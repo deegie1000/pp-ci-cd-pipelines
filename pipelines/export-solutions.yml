@@ -1,0 +1,501 @@
+# =============================================================================
+# Pipeline: Daily Power Platform Solution Export
+# =============================================================================
+# Runs daily at 10pm ET. Detects export branches for the current date,
+# exports solutions from the dev environment, unpacks them, converts to
+# managed, and creates a PR to main.
+#
+# Branch naming convention: export/yyyy-MM-dd-{token}
+# Configuration file:       exports/{yyyy-MM-dd-token}/build.json
+#
+# Prerequisites:
+#   1. Power Platform Build Tools extension installed in the ADO org
+#   2. A Power Platform service connection named in the variable below
+#   3. Secret variables configured in the pipeline UI or a variable group:
+#      - ClientId       : Service Principal Application (Client) ID
+#      - ClientSecret   : Service Principal Client Secret
+#      - TenantId       : Azure AD Tenant ID
+#      (These should match the service principal backing the service connection)
+#   4. Build Service account has "Contribute" and "Create Pull Request"
+#      permissions on the repository
+# =============================================================================
+
+trigger: none
+
+# -----------------------------------------------------------------------------
+# Schedule: 10pm ET daily (3:00 AM UTC = 10:00 PM EST / 2:00 AM UTC = 10:00 PM EDT)
+# To adjust the time, modify the cron expression below.
+# Cron format: minute hour day-of-month month day-of-week (UTC)
+# -----------------------------------------------------------------------------
+schedules:
+  - cron: "0 3 * * *"
+    displayName: "Daily Export - 10pm ET"
+    branches:
+      include:
+        - main
+    always: true
+
+# -----------------------------------------------------------------------------
+# Parameters: Configurable in the ADO UI when running manually
+# -----------------------------------------------------------------------------
+parameters:
+  - name: exportBranch
+    displayName: "Override export branch (leave empty for auto-detect)"
+    type: string
+    default: ""
+
+  - name: dateOverride
+    displayName: "Override date for branch detection (yyyy-MM-dd format, leave empty for today)"
+    type: string
+    default: ""
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  # Name of the Power Platform service connection in ADO (used for reference;
+  # pac CLI auth uses the secret variables below which should match the same
+  # service principal).
+  - name: PowerPlatformServiceConnection
+    value: "PowerPlatformDev"
+
+  # Power Platform environment URL for the dev environment
+  - name: EnvironmentUrl
+    value: "https://yourorg.crm.dynamics.com"
+
+  # Secret variables (configure in pipeline UI or link a variable group):
+  #   ClientId     - Service Principal Application (Client) ID
+  #   ClientSecret - Service Principal Client Secret (mark as secret)
+  #   TenantId     - Azure AD Tenant ID
+
+pool:
+  vmImage: "windows-latest"
+
+steps:
+  # ===========================================================================
+  # Step 1: Checkout repository with full history and persist credentials
+  # ===========================================================================
+  - checkout: self
+    persistCredentials: true
+    fetchDepth: 0
+
+  # ===========================================================================
+  # Step 2: Install Power Platform Build Tools
+  # ===========================================================================
+  - task: PowerPlatformToolInstaller@2
+    displayName: "Install Power Platform Build Tools"
+
+  # ===========================================================================
+  # Step 3: Detect export branch for today's date
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      # Determine target date
+      if ("${{ parameters.dateOverride }}") {
+        $targetDate = "${{ parameters.dateOverride }}"
+        Write-Host "Using override date: $targetDate"
+      } else {
+        # Use Eastern Time for date calculation
+        $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+        $targetDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $eastern).ToString("yyyy-MM-dd")
+        Write-Host "Using today's date (Eastern): $targetDate"
+      }
+
+      # Determine export branch
+      $exportBranch = "${{ parameters.exportBranch }}"
+
+      if ($exportBranch) {
+        Write-Host "Using override export branch: $exportBranch"
+      } else {
+        Write-Host "Auto-detecting export branch matching: export/$targetDate-*"
+
+        $refs = git ls-remote --heads origin "refs/heads/export/$targetDate-*" 2>&1
+
+        if ($LASTEXITCODE -ne 0 -or -not $refs) {
+          Write-Host "##vso[task.logissue type=warning]No export branch found for date $targetDate"
+          Write-Host "##vso[task.setvariable variable=ExportBranchFound]false"
+          Write-Host "No matching export branch found. Pipeline will skip remaining steps."
+          exit 0
+        }
+
+        $branchLines = @($refs -split "`n" | Where-Object { $_.Trim() })
+
+        if ($branchLines.Count -gt 1) {
+          Write-Host "##vso[task.logissue type=warning]Multiple export branches found for $targetDate. Using the first match."
+          foreach ($line in $branchLines) {
+            Write-Host "  Found: $line"
+          }
+        }
+
+        $exportBranch = ($branchLines[0] -split "refs/heads/")[1].Trim()
+        Write-Host "Detected export branch: $exportBranch"
+      }
+
+      # Extract subfolder name (everything after 'export/')
+      $subfolder = $exportBranch -replace "^export/", ""
+
+      Write-Host "Export branch: $exportBranch"
+      Write-Host "Subfolder:     $subfolder"
+
+      Write-Host "##vso[task.setvariable variable=ExportBranch]$exportBranch"
+      Write-Host "##vso[task.setvariable variable=ExportSubfolder]$subfolder"
+      Write-Host "##vso[task.setvariable variable=ExportBranchFound]true"
+    displayName: "Detect export branch"
+
+  # ===========================================================================
+  # Step 4: Checkout the export branch
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      Write-Host "Fetching export branch: $(ExportBranch)"
+      git fetch origin "$(ExportBranch)"
+
+      Write-Host "Checking out: $(ExportBranch)"
+      git checkout "$(ExportBranch)"
+      git pull origin "$(ExportBranch)"
+
+      Write-Host "Successfully checked out $(ExportBranch)"
+    displayName: "Checkout export branch"
+    condition: eq(variables['ExportBranchFound'], 'true')
+
+  # ===========================================================================
+  # Step 5: Read build.json and extract solutions list
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $buildJsonPath = Join-Path "$(Build.SourcesDirectory)" "exports/$(ExportSubfolder)/build.json"
+      Write-Host "Reading build configuration from: $buildJsonPath"
+
+      if (-not (Test-Path $buildJsonPath)) {
+        Write-Error "build.json not found at: $buildJsonPath"
+        exit 1
+      }
+
+      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+      $solutions = $buildConfig.solutions
+
+      if (-not $solutions -or $solutions.Count -eq 0) {
+        Write-Error "No solutions specified in build.json"
+        exit 1
+      }
+
+      Write-Host "Solutions to export ($($solutions.Count)):"
+      foreach ($s in $solutions) {
+        Write-Host "  - $s"
+      }
+
+      # Pass solutions list as a JSON variable for subsequent steps
+      $solutionsJson = ($solutions | ConvertTo-Json -Compress)
+      Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
+    displayName: "Read build.json configuration"
+    condition: eq(variables['ExportBranchFound'], 'true')
+
+  # ===========================================================================
+  # Step 6: Authenticate pac CLI with Power Platform
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      Write-Host "Authenticating pac CLI with environment: $(EnvironmentUrl)"
+
+      pac auth create `
+        --environment "$(EnvironmentUrl)" `
+        --applicationId "$(ClientId)" `
+        --clientSecret "$(ClientSecret)" `
+        --tenant "$(TenantId)"
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to authenticate with Power Platform"
+        exit 1
+      }
+
+      Write-Host "Successfully authenticated with Power Platform"
+      pac auth list
+    displayName: "Authenticate with Power Platform"
+    condition: eq(variables['ExportBranchFound'], 'true')
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 7: Export solutions (unmanaged), clean unpack, and pack as managed
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $solutions = "$(SolutionsList)" | ConvertFrom-Json
+      $sourceDir = "$(Build.SourcesDirectory)"
+
+      # Ensure output directories exist
+      $unmanagedDir = Join-Path $sourceDir "solutions/unmanaged"
+      $unpackedDir  = Join-Path $sourceDir "solutions/unpacked"
+      $managedDir   = Join-Path $sourceDir "solutions/managed"
+
+      New-Item -ItemType Directory -Path $unmanagedDir -Force | Out-Null
+      New-Item -ItemType Directory -Path $unpackedDir  -Force | Out-Null
+      New-Item -ItemType Directory -Path $managedDir   -Force | Out-Null
+
+      $failedSolutions = @()
+
+      foreach ($solution in $solutions) {
+        Write-Host ""
+        Write-Host "============================================"
+        Write-Host "  Processing solution: $solution"
+        Write-Host "============================================"
+
+        # -----------------------------------------------------------------
+        # Export unmanaged solution from Power Platform
+        # -----------------------------------------------------------------
+        $unmanagedZip = Join-Path $unmanagedDir "$solution.zip"
+        Write-Host "`nExporting unmanaged solution..."
+        Write-Host "  Target: $unmanagedZip"
+
+        pac solution export `
+          --name $solution `
+          --path $unmanagedZip `
+          --overwrite
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Failed to export solution: $solution"
+          $failedSolutions += $solution
+          continue
+        }
+        Write-Host "  Export complete."
+
+        # -----------------------------------------------------------------
+        # Clean unpack: delete existing folder, then unpack fresh
+        # -----------------------------------------------------------------
+        $solutionUnpackDir = Join-Path $unpackedDir $solution
+        Write-Host "`nUnpacking solution (clean)..."
+        Write-Host "  Target: $solutionUnpackDir"
+
+        if (Test-Path $solutionUnpackDir) {
+          Write-Host "  Removing existing unpacked folder for clean unpack..."
+          Remove-Item -Path $solutionUnpackDir -Recurse -Force
+        }
+
+        pac solution unpack `
+          --zipfile $unmanagedZip `
+          --folder $solutionUnpackDir `
+          --processCanvasApps `
+          --allowDelete true `
+          --allowWrite true
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Failed to unpack solution: $solution"
+          $failedSolutions += $solution
+          continue
+        }
+        Write-Host "  Unpack complete."
+
+        # -----------------------------------------------------------------
+        # Pack as managed solution
+        # -----------------------------------------------------------------
+        $managedZip = Join-Path $managedDir "$solution.zip"
+        Write-Host "`nPacking managed solution..."
+        Write-Host "  Target: $managedZip"
+
+        pac solution pack `
+          --zipfile $managedZip `
+          --folder $solutionUnpackDir `
+          --type Managed `
+          --processCanvasApps
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Failed to pack managed solution: $solution"
+          $failedSolutions += $solution
+          continue
+        }
+        Write-Host "  Managed pack complete."
+
+        Write-Host "`n  Solution '$solution' processed successfully."
+      }
+
+      Write-Host ""
+      Write-Host "============================================"
+      Write-Host "  Processing Summary"
+      Write-Host "============================================"
+      Write-Host "Total solutions: $($solutions.Count)"
+      Write-Host "Failed:          $($failedSolutions.Count)"
+
+      if ($failedSolutions.Count -gt 0) {
+        Write-Host "Failed solutions: $($failedSolutions -join ', ')"
+        Write-Error "One or more solutions failed to process"
+        exit 1
+      }
+
+      Write-Host "All solutions processed successfully."
+    displayName: "Export, unpack, and pack solutions"
+    condition: eq(variables['ExportBranchFound'], 'true')
+
+  # ===========================================================================
+  # Step 8: Commit and push changes to the export branch
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      git config user.email "pipeline@dev.azure.com"
+      git config user.name "Azure DevOps Pipeline"
+
+      # Stage solution files
+      git add solutions/
+
+      # Check for changes
+      $status = git status --porcelain solutions/
+      if (-not $status) {
+        Write-Host "No changes detected in solutions/ directory."
+        Write-Host "##vso[task.setvariable variable=HasChanges]false"
+        exit 0
+      }
+
+      Write-Host "Changes detected:"
+      git status --short solutions/
+
+      Write-Host "##vso[task.setvariable variable=HasChanges]true"
+
+      # Commit
+      $commitMsg = "chore: export Power Platform solutions [$(ExportSubfolder)]"
+      git commit -m "$commitMsg"
+
+      # Push
+      git push origin "$(ExportBranch)"
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to push changes to $(ExportBranch)"
+        exit 1
+      }
+
+      Write-Host "Changes committed and pushed to $(ExportBranch)"
+    displayName: "Commit and push solution files"
+    condition: eq(variables['ExportBranchFound'], 'true')
+
+  # ===========================================================================
+  # Step 9: Create a Pull Request and auto-complete (merge) into main
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $orgUrl   = "$(System.TeamFoundationCollectionUri)"
+      $project  = "$(System.TeamProject)"
+      $repoId   = "$(Build.Repository.ID)"
+      $token    = $env:SYSTEM_ACCESSTOKEN
+
+      $headers = @{
+        "Authorization" = "Bearer $token"
+        "Content-Type"  = "application/json"
+      }
+
+      # Build solution list for PR description
+      $solutions = "$(SolutionsList)" | ConvertFrom-Json
+      $solutionBullets = ($solutions | ForEach-Object { "- $_" }) -join "`n"
+
+      # -----------------------------------------------------------------
+      # Create the Pull Request
+      # -----------------------------------------------------------------
+      $prBody = @{
+        sourceRefName = "refs/heads/$(ExportBranch)"
+        targetRefName = "refs/heads/main"
+        title         = "Export Power Platform Solutions - $(ExportSubfolder)"
+        description   = @"
+      ## Automated Solution Export
+
+      **Branch:** ``$(ExportBranch)``
+      **Date:** $(ExportSubfolder)
+
+      ### Solutions Exported
+      $solutionBullets
+
+      ### Contents
+      - ``solutions/unmanaged/`` - Unmanaged solution zip files
+      - ``solutions/unpacked/``  - Unpacked solution source (clean unpack)
+      - ``solutions/managed/``   - Managed solution zip files
+
+      ---
+      *This PR was created automatically by the export-solutions pipeline.*
+      "@
+      } | ConvertTo-Json -Depth 5
+
+      $createUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests?api-version=7.1"
+      Write-Host "Creating Pull Request..."
+
+      try {
+        $pr = Invoke-RestMethod -Uri $createUrl -Method Post -Headers $headers -Body $prBody
+        $prId = $pr.pullRequestId
+        Write-Host "Pull Request created: PR #$prId"
+        Write-Host "URL: $($pr.url)"
+      } catch {
+        Write-Error "Failed to create Pull Request: $_"
+        exit 1
+      }
+
+      # -----------------------------------------------------------------
+      # Set the PR to auto-complete with squash merge
+      # -----------------------------------------------------------------
+      Write-Host "`nSetting PR to auto-complete..."
+
+      $completeBody = @{
+        autoCompleteSetBy = @{
+          id = $pr.createdBy.id
+        }
+        completionOptions = @{
+          deleteSourceBranch = $true
+          mergeStrategy      = "squash"
+          mergeCommitMessage = "chore: export Power Platform solutions [$(ExportSubfolder)]"
+        }
+      } | ConvertTo-Json -Depth 5
+
+      $updateUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}?api-version=7.1"
+
+      try {
+        $updated = Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $completeBody
+        Write-Host "PR #$prId set to auto-complete."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not set auto-complete on PR #$prId. It may require manual completion: $_"
+      }
+
+      # -----------------------------------------------------------------
+      # Attempt to approve the PR (with build service identity)
+      # -----------------------------------------------------------------
+      Write-Host "`nAttempting to approve PR..."
+
+      $approveBody = @{ vote = 10 } | ConvertTo-Json
+
+      $reviewerUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}/reviewers/$($pr.createdBy.id)?api-version=7.1"
+
+      try {
+        Invoke-RestMethod -Uri $reviewerUrl -Method Put -Headers $headers -Body $approveBody | Out-Null
+        Write-Host "PR #$prId approved."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not auto-approve PR #$prId: $_"
+      }
+
+      # -----------------------------------------------------------------
+      # Attempt to complete the PR directly
+      # -----------------------------------------------------------------
+      Write-Host "`nAttempting to complete (merge) PR..."
+
+      $mergeBody = @{
+        status                = "completed"
+        lastMergeSourceCommit = $pr.lastMergeSourceCommit
+        completionOptions     = @{
+          deleteSourceBranch = $true
+          mergeStrategy      = "squash"
+          mergeCommitMessage = "chore: export Power Platform solutions [$(ExportSubfolder)]"
+        }
+      } | ConvertTo-Json -Depth 5
+
+      try {
+        $completed = Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $mergeBody
+        Write-Host "PR #$prId completed and merged into main."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not auto-complete PR #$prId. It may require branch policies to be satisfied first: $_"
+        Write-Host "The PR has been set to auto-complete and will merge once all policies are met."
+      }
+
+      Write-Host "`nPull Request processing complete."
+    displayName: "Create and merge Pull Request"
+    condition: and(eq(variables['ExportBranchFound'], 'true'), eq(variables['HasChanges'], 'true'))
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
