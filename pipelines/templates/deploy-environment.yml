@@ -1,7 +1,7 @@
 # =============================================================================
-# Template: Deploy Power Platform Solutions to a single environment
+# Template: Deploy Power Platform Solutions to a single environment (deploy-environment)
 # =============================================================================
-# Reusable stage template used by release-solutions.yml.
+# Reusable environment template used by release-solutions.yml.
 # Deploys managed solutions in the order defined in build.json, skipping any
 # that are already installed at the target version.
 #

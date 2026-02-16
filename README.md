@@ -12,7 +12,7 @@ pp-ci-cd-pipelines/
 │   ├── export-solution-predev.yml       # On-demand single solution export (Pre-Dev)
 │   ├── deploy-solution-dev.yml          # Auto-triggered deploy to Dev
 │   └── templates/
-│       └── deploy-stage.yml             # Reusable deploy stage (used by release pipeline)
+│       └── deploy-environment.yml        # Reusable deploy template (used by release pipeline)
 ├── exports/
 │   └── {yyyy-MM-dd-token}/
 │       └── build.json                   # Export configuration per scheduled run
@@ -108,7 +108,7 @@ Stage and Prod approvals are controlled by **ADO Environment approval checks** (
 
 **Auth:** Uses pac CLI with credentials from variable groups (`PowerPlatform-QA`, `PowerPlatform-Stage`, `PowerPlatform-Prod`).
 
-**Template:** Uses `pipelines/templates/deploy-stage.yml` for each stage to keep the logic DRY.
+**Template:** Uses `pipelines/templates/deploy-environment.yml` for each stage to keep the logic DRY.
 
 ---
 

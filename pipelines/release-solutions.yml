@@ -43,7 +43,7 @@ stages:
   # ===========================================================================
   # QA — Deploys automatically when the export pipeline completes
   # ===========================================================================
-  - template: templates/deploy-stage.yml
+  - template: templates/deploy-environment.yml
     parameters:
       stageName: QA
       displayName: "Deploy to QA"
@@ -53,7 +53,7 @@ stages:
   # ===========================================================================
   # Stage — Requires manual approval (configure on the ADO environment)
   # ===========================================================================
-  - template: templates/deploy-stage.yml
+  - template: templates/deploy-environment.yml
     parameters:
       stageName: Stage
       displayName: "Deploy to Stage"
@@ -64,7 +64,7 @@ stages:
   # ===========================================================================
   # Prod — Requires manual approval (configure on the ADO environment)
   # ===========================================================================
-  - template: templates/deploy-stage.yml
+  - template: templates/deploy-environment.yml
     parameters:
       stageName: Prod
       displayName: "Deploy to Prod"
