@@ -188,7 +188,7 @@ steps:
       }
 
       # Pass solutions list as a JSON variable for subsequent steps
-      $solutionsJson = ($solutions | ConvertTo-Json -Compress)
+      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
     displayName: "Read build.json configuration"
     condition: eq(variables['ExportBranchFound'], 'true')
@@ -225,7 +225,7 @@ steps:
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      $solutions = "$(SolutionsList)" | ConvertFrom-Json
+      $solutions = @("$(SolutionsList)" | ConvertFrom-Json)
       $sourceDir = "$(Build.SourcesDirectory)"
 
       # Ensure output directories exist
@@ -461,7 +461,7 @@ steps:
       }
 
       # Build solution list for PR description
-      $solutions = "$(SolutionsList)" | ConvertFrom-Json
+      $solutions = @("$(SolutionsList)" | ConvertFrom-Json)
       $solutionBullets = ($solutions | ForEach-Object { "- $($_.name) (v$($_.version))" }) -join "`n"
 
       # -----------------------------------------------------------------
