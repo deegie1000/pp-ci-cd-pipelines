@@ -1,0 +1,201 @@
+# =============================================================================
+# Pipeline: Export Solution from Pre-Dev (On-Demand)
+# =============================================================================
+# Manually triggered pipeline that exports a single solution from the Pre-Dev
+# environment, unpacks it into source control, and packs it as managed.
+#
+# On successful completion this pipeline automatically triggers the
+# deploy-solution-dev pipeline which imports the managed solution into Dev.
+#
+# Prerequisites:
+#   1. Power Platform Build Tools extension installed in the ADO org
+#   2. A Power Platform SPN service connection for the Pre-Dev environment
+#      (configured under Project Settings > Service Connections)
+#   3. Build Service account has "Contribute" permission on the repository
+#
+# No secret pipeline variables are required - authentication is handled
+# entirely through the service connection.
+# =============================================================================
+
+trigger: none
+
+# -----------------------------------------------------------------------------
+# Parameters: Configurable in the ADO UI when running manually
+# -----------------------------------------------------------------------------
+parameters:
+  - name: solutionName
+    displayName: "Solution unique name (as it appears in Power Platform)"
+    type: string
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  # Name of the Power Platform SPN service connection for the Pre-Dev
+  # environment. Create this under Project Settings > Service Connections >
+  # Power Platform (using Application ID / Client Secret authentication).
+  - name: PreDevServiceConnection
+    value: "PowerPlatformPreDev"
+
+pool:
+  vmImage: "windows-latest"
+
+steps:
+  # ===========================================================================
+  # Step 1: Checkout repository with persist credentials (needed for push)
+  # ===========================================================================
+  - checkout: self
+    persistCredentials: true
+    fetchDepth: 0
+
+  # ===========================================================================
+  # Step 2: Install Power Platform Build Tools
+  # ===========================================================================
+  - task: PowerPlatformToolInstaller@2
+    displayName: "Install Power Platform Build Tools"
+
+  # ===========================================================================
+  # Step 3: Ensure output directories exist
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $dirs = @(
+        "$(Build.SourcesDirectory)/solutions/unmanaged",
+        "$(Build.SourcesDirectory)/solutions/unpacked",
+        "$(Build.SourcesDirectory)/solutions/managed"
+      )
+
+      foreach ($dir in $dirs) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Write-Host "Ensured directory exists: $dir"
+      }
+    displayName: "Create output directories"
+
+  # ===========================================================================
+  # Step 4: Export unmanaged solution from Pre-Dev
+  # ===========================================================================
+  - task: PowerPlatformExportSolution@2
+    displayName: "Export unmanaged solution from Pre-Dev"
+    inputs:
+      authenticationType: PowerPlatformSPN
+      PowerPlatformSPN: $(PreDevServiceConnection)
+      SolutionName: ${{ parameters.solutionName }}
+      SolutionOutputFile: $(Build.SourcesDirectory)/solutions/unmanaged/${{ parameters.solutionName }}.zip
+      Managed: false
+      AsyncOperation: true
+      MaxAsyncWaitTime: 60
+
+  # ===========================================================================
+  # Step 5: Clean unpack the exported solution
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $solutionName = "${{ parameters.solutionName }}"
+      $unmanagedZip = "$(Build.SourcesDirectory)/solutions/unmanaged/$solutionName.zip"
+      $unpackDir    = "$(Build.SourcesDirectory)/solutions/unpacked/$solutionName"
+
+      Write-Host "============================================"
+      Write-Host "  Clean unpack: $solutionName"
+      Write-Host "============================================"
+
+      # Clean: remove existing unpacked folder for a fresh unpack
+      if (Test-Path $unpackDir) {
+        Write-Host "Removing existing unpacked folder: $unpackDir"
+        Remove-Item -Path $unpackDir -Recurse -Force
+      }
+
+      Write-Host "Unpacking from: $unmanagedZip"
+      Write-Host "Unpacking to:   $unpackDir"
+
+      pac solution unpack `
+        --zipfile $unmanagedZip `
+        --folder $unpackDir `
+        --processCanvasApps `
+        --allowDelete true `
+        --allowWrite true
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to unpack solution: $solutionName"
+        exit 1
+      }
+
+      Write-Host "Unpack complete."
+    displayName: "Clean unpack solution"
+
+  # ===========================================================================
+  # Step 6: Pack as managed solution
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $solutionName = "${{ parameters.solutionName }}"
+      $unpackDir    = "$(Build.SourcesDirectory)/solutions/unpacked/$solutionName"
+      $managedZip   = "$(Build.SourcesDirectory)/solutions/managed/$solutionName.zip"
+
+      Write-Host "============================================"
+      Write-Host "  Pack managed: $solutionName"
+      Write-Host "============================================"
+      Write-Host "Source folder: $unpackDir"
+      Write-Host "Output zip:   $managedZip"
+
+      pac solution pack `
+        --zipfile $managedZip `
+        --folder $unpackDir `
+        --type Managed `
+        --processCanvasApps
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to pack managed solution: $solutionName"
+        exit 1
+      }
+
+      Write-Host "Managed pack complete."
+    displayName: "Pack managed solution"
+
+  # ===========================================================================
+  # Step 7: Commit and push solution files to the repository
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      git config user.email "pipeline@dev.azure.com"
+      git config user.name "Azure DevOps Pipeline"
+
+      # Stage all solution files
+      git add solutions/
+
+      # Check for changes
+      $status = git status --porcelain solutions/
+      if (-not $status) {
+        Write-Host "No changes detected in solutions/ directory. Skipping commit."
+        exit 0
+      }
+
+      Write-Host "Changes detected:"
+      git status --short solutions/
+
+      # Commit and push
+      $commitMsg = "chore: export ${{ parameters.solutionName }} from Pre-Dev"
+      git commit -m "$commitMsg"
+
+      git push
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to push changes"
+        exit 1
+      }
+
+      Write-Host "Changes committed and pushed."
+    displayName: "Commit and push solution files"
+
+  # ===========================================================================
+  # Step 8: Publish managed solution as pipeline artifact
+  #         (consumed by the deploy-solution-dev pipeline)
+  # ===========================================================================
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish managed solution artifact"
+    inputs:
+      targetPath: $(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}.zip
+      artifact: ManagedSolution

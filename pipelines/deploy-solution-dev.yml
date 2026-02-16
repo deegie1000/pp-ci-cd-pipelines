@@ -1,0 +1,164 @@
+# =============================================================================
+# Pipeline: Deploy Managed Solution to Dev
+# =============================================================================
+# Automatically triggered when the "Export Solution from Pre-Dev" pipeline
+# completes successfully. Can also be run manually.
+#
+# Auto-triggered: Downloads the managed solution artifact published by the
+#                 export pipeline and imports it into the Dev environment.
+#
+# Manual run:     Requires the solutionName parameter. Checks out the repo
+#                 and imports solutions/managed/{solutionName}.zip into Dev.
+#
+# Prerequisites:
+#   1. Power Platform Build Tools extension installed in the ADO org
+#   2. A Power Platform SPN service connection for the Dev environment
+#      (configured under Project Settings > Service Connections)
+#   3. The export pipeline (export-solution-predev.yml) must be registered
+#      in ADO with the name specified in resources.pipelines.source below
+#
+# No secret pipeline variables are required - authentication is handled
+# entirely through the service connection.
+# =============================================================================
+
+trigger: none
+
+# -----------------------------------------------------------------------------
+# Pipeline resource: triggers this pipeline when the export pipeline completes
+# -----------------------------------------------------------------------------
+# IMPORTANT: The 'source' value must match the name of the export pipeline as
+# it appears in Azure DevOps (Pipelines > All Pipelines). If you renamed the
+# pipeline in the ADO UI, update the source value to match.
+# -----------------------------------------------------------------------------
+resources:
+  pipelines:
+    - pipeline: exportSolution
+      source: "Export Solution from Pre-Dev"
+      trigger:
+        branches:
+          include:
+            - main
+
+# -----------------------------------------------------------------------------
+# Parameters: For manual runs only
+# -----------------------------------------------------------------------------
+parameters:
+  - name: solutionName
+    displayName: "Solution name (required for manual runs, ignored for auto-triggered)"
+    type: string
+    default: ""
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  # Name of the Power Platform SPN service connection for the Dev environment.
+  # Create this under Project Settings > Service Connections > Power Platform
+  # (using Application ID / Client Secret authentication).
+  - name: DevServiceConnection
+    value: "PowerPlatformDev"
+
+pool:
+  vmImage: "windows-latest"
+
+steps:
+  # ===========================================================================
+  # Step 1: Checkout repository (needed for manual runs)
+  # ===========================================================================
+  - checkout: self
+
+  # ===========================================================================
+  # Step 2: Install Power Platform Build Tools
+  # ===========================================================================
+  - task: PowerPlatformToolInstaller@2
+    displayName: "Install Power Platform Build Tools"
+
+  # ===========================================================================
+  # Step 3: Download managed solution artifact (auto-triggered runs only)
+  # ===========================================================================
+  - download: exportSolution
+    artifact: ManagedSolution
+    displayName: "Download managed solution from export pipeline"
+    condition: eq(variables['Build.Reason'], 'ResourceTrigger')
+
+  # ===========================================================================
+  # Step 4: Resolve the managed solution file path
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      if ("$(Build.Reason)" -eq "ResourceTrigger") {
+        # -------------------------------------------------------------------
+        # Auto-triggered: find the zip in the downloaded artifact
+        # -------------------------------------------------------------------
+        $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
+        Write-Host "Looking for managed solution in artifact: $artifactDir"
+
+        $zips = Get-ChildItem -Path $artifactDir -Filter "*.zip" -ErrorAction SilentlyContinue
+
+        if (-not $zips -or $zips.Count -eq 0) {
+          Write-Error "No solution zip found in artifact directory: $artifactDir"
+          exit 1
+        }
+
+        $solutionZip = $zips[0].FullName
+        $solutionName = [System.IO.Path]::GetFileNameWithoutExtension($solutionZip)
+        Write-Host "Found solution artifact: $solutionZip"
+
+      } else {
+        # -------------------------------------------------------------------
+        # Manual run: use the repo path based on parameter
+        # -------------------------------------------------------------------
+        $solutionName = "${{ parameters.solutionName }}"
+
+        if (-not $solutionName) {
+          Write-Error "The solutionName parameter is required for manual runs."
+          exit 1
+        }
+
+        $solutionZip = "$(Build.SourcesDirectory)/solutions/managed/$solutionName.zip"
+        Write-Host "Using managed solution from repo: $solutionZip"
+
+        if (-not (Test-Path $solutionZip)) {
+          Write-Error "Managed solution not found: $solutionZip. Run the export pipeline first or verify the solution name."
+          exit 1
+        }
+      }
+
+      Write-Host ""
+      Write-Host "============================================"
+      Write-Host "  Deploying to Dev: $solutionName"
+      Write-Host "  Solution zip:     $solutionZip"
+      Write-Host "============================================"
+
+      Write-Host "##vso[task.setvariable variable=SolutionZipPath]$solutionZip"
+      Write-Host "##vso[task.setvariable variable=SolutionName]$solutionName"
+    displayName: "Resolve solution file path"
+
+  # ===========================================================================
+  # Step 5: Import managed solution into Dev environment
+  # ===========================================================================
+  - task: PowerPlatformImportSolution@2
+    displayName: "Import managed solution to Dev"
+    inputs:
+      authenticationType: PowerPlatformSPN
+      PowerPlatformSPN: $(DevServiceConnection)
+      SolutionInputFile: $(SolutionZipPath)
+      AsyncOperation: true
+      MaxAsyncWaitTime: 60
+
+  # ===========================================================================
+  # Step 6: Confirm deployment
+  # ===========================================================================
+  - pwsh: |
+      Write-Host ""
+      Write-Host "============================================"
+      Write-Host "  Deployment Complete"
+      Write-Host "============================================"
+      Write-Host "Solution '$(SolutionName)' has been imported"
+      Write-Host "into the Dev environment as managed."
+      Write-Host ""
+      Write-Host "Verify in the Power Platform Admin Center or"
+      Write-Host "maker portal that the solution is present and"
+      Write-Host "functioning as expected."
+    displayName: "Deployment summary"
