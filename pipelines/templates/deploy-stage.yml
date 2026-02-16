@@ -1,0 +1,224 @@
+# =============================================================================
+# Template: Deploy Power Platform Solutions to a single environment
+# =============================================================================
+# Reusable stage template used by release-solutions.yml.
+# Deploys managed solutions in the order defined in build.json, skipping any
+# that are already installed at the target version.
+#
+# Required variable group keys: EnvironmentUrl, ClientId, ClientSecret, TenantId
+# =============================================================================
+
+parameters:
+  - name: stageName
+    type: string
+  - name: displayName
+    type: string
+  - name: environmentName
+    type: string
+  - name: variableGroup
+    type: string
+  - name: dependsOn
+    type: string
+    default: ""
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: ${{ parameters.displayName }}
+    ${{ if eq(parameters.dependsOn, '') }}:
+      dependsOn: []
+    ${{ else }}:
+      dependsOn: ${{ parameters.dependsOn }}
+    variables:
+      - group: ${{ parameters.variableGroup }}
+    jobs:
+      - deployment: Deploy
+        displayName: "Deploy solutions to ${{ parameters.stageName }}"
+        environment: ${{ parameters.environmentName }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # ===============================================================
+                # Download managed solution artifacts from the export pipeline
+                # ===============================================================
+                - download: ExportPipeline
+                  artifact: ManagedSolutions
+                  displayName: "Download managed solution artifacts"
+
+                # ===============================================================
+                # Install Power Platform Build Tools
+                # ===============================================================
+                - task: PowerPlatformToolInstaller@2
+                  displayName: "Install Power Platform Build Tools"
+
+                # ===============================================================
+                # Authenticate pac CLI with target environment
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "Authenticating with: $(EnvironmentUrl)"
+
+                    pac auth create `
+                      --environment "$(EnvironmentUrl)" `
+                      --applicationId "$(ClientId)" `
+                      --clientSecret "$(ClientSecret)" `
+                      --tenant "$(TenantId)"
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to authenticate with Power Platform"
+                      exit 1
+                    }
+
+                    Write-Host "Successfully authenticated."
+                    pac auth list
+                  displayName: "Authenticate with Power Platform"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Deploy solutions in build.json order
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    # -----------------------------------------------------------
+                    # Read build.json from artifact
+                    # -----------------------------------------------------------
+                    $artifactDir = "$(Pipeline.Workspace)/ExportPipeline/ManagedSolutions"
+                    $buildJsonPath = Join-Path $artifactDir "build.json"
+
+                    if (-not (Test-Path $buildJsonPath)) {
+                      Write-Error "build.json not found in artifact at: $buildJsonPath"
+                      exit 1
+                    }
+
+                    $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+                    $solutions = $buildConfig.solutions
+
+                    if (-not $solutions -or $solutions.Count -eq 0) {
+                      Write-Error "No solutions specified in build.json"
+                      exit 1
+                    }
+
+                    Write-Host "Solutions to deploy ($($solutions.Count)):"
+                    foreach ($s in $solutions) {
+                      Write-Host "  - $($s.name) (v$($s.version))"
+                    }
+
+                    # -----------------------------------------------------------
+                    # Query installed solutions from the target environment
+                    # -----------------------------------------------------------
+                    Write-Host "`nQuerying installed solutions in target environment..."
+                    $listOutput = pac solution list 2>&1 | Out-String
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to list solutions in target environment"
+                      Write-Host $listOutput
+                      exit 1
+                    }
+
+                    Write-Host $listOutput
+
+                    # Parse table output into hashtable: uniqueName -> version
+                    $installed = @{}
+                    $dataStarted = $false
+
+                    foreach ($rawLine in ($listOutput -split "\r?\n")) {
+                      $line = $rawLine.Trim()
+                      if (-not $line) { continue }
+
+                      # Detect the separator line (dashes/box-drawing chars)
+                      if ($line -match "^[\-\u2500\s]+$" -and $line.Length -gt 10) {
+                        $dataStarted = $true
+                        continue
+                      }
+                      if (-not $dataStarted) { continue }
+
+                      # First column = unique name (no spaces), then look for version (x.x.x.x)
+                      if ($line -match "^(\S+)\s+.*?(\d+\.\d+\.\d+\.\d+)") {
+                        $installed[$Matches[1]] = $Matches[2]
+                      }
+                    }
+
+                    Write-Host "Found $($installed.Count) solutions in target environment.`n"
+
+                    # -----------------------------------------------------------
+                    # Deploy each solution in order
+                    # -----------------------------------------------------------
+                    $failedSolutions = @()
+                    $skippedSolutions = @()
+                    $deployedSolutions = @()
+
+                    foreach ($solution in $solutions) {
+                      $name    = $solution.name
+                      $version = $solution.version
+                      $zipPath = Join-Path $artifactDir "${name}_${version}.zip"
+
+                      Write-Host ""
+                      Write-Host "============================================"
+                      Write-Host "  Solution: $name (v$version)"
+                      Write-Host "============================================"
+
+                      # Verify managed zip exists in artifact
+                      if (-not (Test-Path $zipPath)) {
+                        Write-Error "Managed zip not found in artifact: $zipPath"
+                        $failedSolutions += $name
+                        continue
+                      }
+
+                      # Check if already installed at this version
+                      if ($installed.ContainsKey($name)) {
+                        $installedVersion = $installed[$name]
+                        if ($installedVersion -eq $version) {
+                          Write-Host "  Already installed at v$version — skipping."
+                          $skippedSolutions += $name
+                          continue
+                        }
+                        Write-Host "  Currently installed: v$installedVersion — upgrading to v$version"
+                      } else {
+                        Write-Host "  Not currently installed — fresh install"
+                      }
+
+                      # Import managed solution
+                      Write-Host "  Importing managed solution..."
+
+                      pac solution import `
+                        --path $zipPath `
+                        --force-overwrite `
+                        --activate-plugins
+
+                      if ($LASTEXITCODE -ne 0) {
+                        Write-Error "Failed to import solution: $name"
+                        $failedSolutions += $name
+                        continue
+                      }
+
+                      Write-Host "  Successfully deployed."
+                      $deployedSolutions += $name
+                    }
+
+                    # -----------------------------------------------------------
+                    # Summary
+                    # -----------------------------------------------------------
+                    Write-Host ""
+                    Write-Host "============================================"
+                    Write-Host "  Deployment Summary — ${{ parameters.stageName }}"
+                    Write-Host "============================================"
+                    Write-Host "Total solutions: $($solutions.Count)"
+                    Write-Host "Deployed:        $($deployedSolutions.Count)"
+                    Write-Host "Skipped:         $($skippedSolutions.Count)"
+                    Write-Host "Failed:          $($failedSolutions.Count)"
+
+                    if ($skippedSolutions.Count -gt 0) {
+                      Write-Host "Skipped (already at target version): $($skippedSolutions -join ', ')"
+                    }
+
+                    if ($failedSolutions.Count -gt 0) {
+                      Write-Host "Failed solutions: $($failedSolutions -join ', ')"
+                      Write-Error "One or more solutions failed to deploy"
+                      exit 1
+                    }
+
+                    Write-Host "`nAll solutions deployed successfully to ${{ parameters.stageName }}."
+                  displayName: "Deploy solutions"
