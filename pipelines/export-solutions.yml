@@ -126,13 +126,13 @@ steps:
           Sort-Object)
 
         if ($branchNames.Count -gt 1) {
-          Write-Host "##vso[task.logissue type=warning]Multiple export branches found for $targetDate. Using the last alphabetically."
+          Write-Host "##vso[task.logissue type=warning]Multiple export branches found for $targetDate. Using the first alphabetically."
           foreach ($name in $branchNames) {
             Write-Host "  Found: $name"
           }
         }
 
-        $exportBranch = $branchNames[-1]
+        $exportBranch = $branchNames[0]
         Write-Host "Detected export branch: $exportBranch"
       }
 
