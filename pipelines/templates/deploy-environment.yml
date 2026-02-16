@@ -110,38 +110,25 @@ stages:
                     # Query installed solutions from the target environment
                     # -----------------------------------------------------------
                     Write-Host "`nQuerying installed solutions in target environment..."
-                    $listOutput = pac solution list 2>&1 | Out-String
+                    $listJson = pac solution list --output json 2>&1 | Out-String
 
                     if ($LASTEXITCODE -ne 0) {
                       Write-Error "Failed to list solutions in target environment"
-                      Write-Host $listOutput
+                      Write-Host $listJson
                       exit 1
                     }
 
-                    Write-Host $listOutput
-
-                    # Parse table output into hashtable: uniqueName -> version
+                    $installedList = @($listJson | ConvertFrom-Json)
                     $installed = @{}
-                    $dataStarted = $false
-
-                    foreach ($rawLine in ($listOutput -split "\r?\n")) {
-                      $line = $rawLine.Trim()
-                      if (-not $line) { continue }
-
-                      # Detect the separator line (dashes/box-drawing chars)
-                      if ($line -match "^[\-\u2500\s]+$" -and $line.Length -gt 10) {
-                        $dataStarted = $true
-                        continue
-                      }
-                      if (-not $dataStarted) { continue }
-
-                      # First column = unique name (no spaces), then look for version (x.x.x.x)
-                      if ($line -match "^(\S+)\s+.*?(\d+\.\d+\.\d+\.\d+)") {
-                        $installed[$Matches[1]] = $Matches[2]
-                      }
+                    foreach ($s in $installedList) {
+                      $installed[$s.uniqueName] = $s.version
                     }
 
-                    Write-Host "Found $($installed.Count) solutions in target environment.`n"
+                    Write-Host "Found $($installed.Count) solutions in target environment."
+                    foreach ($key in $installed.Keys) {
+                      Write-Host "  $key = v$($installed[$key])"
+                    }
+                    Write-Host ""
 
                     # -----------------------------------------------------------
                     # Deploy each solution in order
