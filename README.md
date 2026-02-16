@@ -1,24 +1,38 @@
 # Power Platform CI/CD Pipelines
 
-Azure DevOps pipelines for exporting, importing, and managing Power Platform solutions.
+Azure DevOps pipelines for exporting, versioning, and deploying Power Platform solutions across environments.
 
 ## Repository Structure
 
 ```
 pp-ci-cd-pipelines/
 ├── pipelines/
-│   ├── export-solutions.yml         # Daily scheduled solution export (Dev)
-│   ├── export-solution-predev.yml   # On-demand single solution export (Pre-Dev)
-│   └── deploy-solution-dev.yml      # Auto-triggered deploy to Dev
+│   ├── export-solutions.yml             # Daily scheduled export (Dev → repo)
+│   ├── release-solutions.yml            # Release pipeline (QA → Stage → Prod)
+│   ├── export-solution-predev.yml       # On-demand single solution export (Pre-Dev)
+│   ├── deploy-solution-dev.yml          # Auto-triggered deploy to Dev
+│   └── templates/
+│       └── deploy-stage.yml             # Reusable deploy stage (used by release pipeline)
 ├── exports/
 │   └── {yyyy-MM-dd-token}/
-│       └── build.json               # Export configuration per scheduled run
+│       └── build.json                   # Export configuration per scheduled run
 ├── solutions/
-│   ├── unpacked/{SolutionName}/     # Unpacked solution source files
-│   ├── unmanaged/{SolutionName}.zip # Unmanaged solution zips
-│   └── managed/{SolutionName}.zip   # Managed solution zips
+│   ├── unpacked/{SolutionName}/         # Unpacked solution source files
+│   ├── unmanaged/{SolutionName}_v.zip   # Versioned unmanaged solution zips
+│   └── managed/{SolutionName}_v.zip     # Versioned managed solution zips
 └── README.md
 ```
+
+---
+
+## Pipeline Overview
+
+| # | Pipeline | Trigger | Purpose |
+|---|----------|---------|---------|
+| 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET daily) | Export from Dev, validate versions, pack managed, PR to main |
+| 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod |
+| 3 | [Export from Pre-Dev](#3-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
+| 4 | [Deploy to Dev](#4-deploy-solution-to-dev) | Auto (on Pre-Dev export) | Import managed solution into Dev |
 
 ---
 
@@ -26,26 +40,79 @@ pp-ci-cd-pipelines/
 
 ### 1. Daily Export Solutions (`pipelines/export-solutions.yml`)
 
-Exports solutions from the Power Platform **Dev** environment on a daily schedule, unpacks them into source control, and converts them to managed packages.
+Exports solutions from the Power Platform **Dev** environment on a daily schedule, validates their versions against `build.json`, unpacks them into source control, converts them to managed packages, and creates a PR to merge into `main`.
 
 **What it does:**
 
 1. Detects a Git branch matching `export/{today's date}-{token}` (e.g., `export/2026-02-15-sprint42`)
-2. Reads `exports/{date-token}/build.json` on that branch for the list of solutions to export
+2. Reads `exports/{date-token}/build.json` on that branch for the list of solutions and their expected versions
 3. For each solution:
+   - Checks if a managed zip already exists for this name + version (cache check &mdash; skips if so)
    - Exports the **unmanaged** solution zip from Power Platform &rarr; `solutions/unmanaged/`
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
+   - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Commits the results and pushes to the export branch
-5. Creates a Pull Request to `main`, sets it to auto-complete (squash merge), and deletes the source branch
+4. Publishes managed zips and `build.json` as pipeline artifacts (consumed by the release pipeline)
+5. Commits solution files and pushes to the export branch
+6. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
 
-**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually.
+**Version validation:** The pipeline does **not** modify solution versions in Dev or update `build.json`. The `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
+
+```
+Version mismatch for 'MySolution': build.json specifies v1.0.0.0 but dev environment has v1.1.0.0.
+Update build.json to match the dev environment before re-running.
+```
+
+**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with optional overrides for branch name and date.
+
+**Parameters (manual runs):**
+
+| Parameter | Description |
+|---|---|
+| `exportBranch` | Override export branch name (skip auto-detect) |
+| `dateOverride` | Override date for branch detection (yyyy-MM-dd) |
 
 **Auth:** Uses pac CLI with secret pipeline variables (`ClientId`, `ClientSecret`, `TenantId`).
 
+**Artifact published:** `ManagedSolutions` &mdash; contains `build.json` and `{SolutionName}_{version}.zip` files.
+
 ---
 
-### 2. Export Solution from Pre-Dev (`pipelines/export-solution-predev.yml`)
+### 2. Release Solutions (`pipelines/release-solutions.yml`)
+
+Deploys managed solutions through three environments in sequence: **QA &rarr; Stage &rarr; Prod**. Triggers automatically when the daily export pipeline completes on `main`.
+
+**What it does (per stage):**
+
+1. Downloads the `ManagedSolutions` artifact from the export pipeline
+2. Authenticates with the target environment using credentials from a per-environment variable group
+3. Queries all installed solutions in the target environment using `pac solution list`
+4. For each solution in `build.json` (in order):
+   - **Skip** &mdash; if the solution is already installed at the target version
+   - **Fresh install** &mdash; if the solution doesn't exist in the target environment
+   - **Upgrade** &mdash; if the solution exists but at a different version
+   - Imports as managed with `--force-overwrite --activate-plugins`
+5. Fails the stage if any solution fails to deploy
+
+**Stages:**
+
+| Stage | Deploys To | Trigger | Approval Required |
+|---|---|---|---|
+| **QA** | QA environment | Automatic (on export completion) | No |
+| **Stage** | Stage environment | After QA succeeds | **Yes** &mdash; manual approval |
+| **Prod** | Prod environment | After Stage succeeds | **Yes** &mdash; manual approval |
+
+Stage and Prod approvals are controlled by **ADO Environment approval checks** (not pipeline gates). See [Step 5: Create ADO Environments](#step-5-create-ado-environments-release-pipeline) for setup.
+
+**Trigger:** Automatic &mdash; runs when the `export-solutions` pipeline completes on the `main` branch.
+
+**Auth:** Uses pac CLI with credentials from variable groups (`PowerPlatform-QA`, `PowerPlatform-Stage`, `PowerPlatform-Prod`).
+
+**Template:** Uses `pipelines/templates/deploy-stage.yml` for each stage to keep the logic DRY.
+
+---
+
+### 3. Export Solution from Pre-Dev (`pipelines/export-solution-predev.yml`)
 
 On-demand pipeline that exports a **single solution** from the **Pre-Dev** environment and promotes it through the build process.
 
@@ -64,7 +131,7 @@ On-demand pipeline that exports a **single solution** from the **Pre-Dev** envir
 
 ---
 
-### 3. Deploy Solution to Dev (`pipelines/deploy-solution-dev.yml`)
+### 4. Deploy Solution to Dev (`pipelines/deploy-solution-dev.yml`)
 
 Imports a managed solution into the **Dev** environment. Runs automatically after the Pre-Dev export pipeline completes, or can be triggered manually.
 
@@ -79,7 +146,34 @@ Imports a managed solution into the **Dev** environment. Runs automatically afte
 
 ---
 
-### Pipeline Flow: Pre-Dev to Dev Promotion
+## Pipeline Flow
+
+### Daily Export + Release (Dev &rarr; QA &rarr; Stage &rarr; Prod)
+
+This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the release pipeline promotes them through all downstream environments.
+
+```
+ EXPORT                                RELEASE
+ ──────                                ───────
+
+┌──────────────────────────┐    ┌─────────────────────────────────────────────┐
+│  Daily Export Solutions   │    │  Release Solutions                          │
+│  (scheduled / manual)    │    │  (auto-triggered on export completion)      │
+│                          │    │                                             │
+│  1. Detect export branch │    │  ┌─────────┐  ┌─────────┐  ┌────────────┐ │
+│  2. Read build.json      │    │  │   QA    │  │  Stage  │  │    Prod    │ │
+│  3. Export from Dev      │    │  │  (auto) │─►│(manual) │─►│  (manual)  │ │
+│  4. Validate versions    │───►│  │         │  │         │  │            │ │
+│  5. Unpack + pack managed│    │  └─────────┘  └─────────┘  └────────────┘ │
+│  6. Publish artifact     │    │                                             │
+│  7. PR to main           │    │  Each stage:                                │
+│                          │    │  - Checks installed versions                │
+└──────────────────────────┘    │  - Skips if already at target version       │
+                                │  - Imports managed + force-overwrite        │
+                                └─────────────────────────────────────────────┘
+```
+
+### Pre-Dev to Dev Promotion (On-Demand)
 
 ```
 ┌─────────────────────────────────┐       ┌──────────────────────────────┐
@@ -94,6 +188,38 @@ Imports a managed solution into the **Dev** environment. Runs automatically afte
 │  5. Publish artifact            │       │                              │
 └─────────────────────────────────┘       └──────────────────────────────┘
 ```
+
+---
+
+## build.json Configuration
+
+The `build.json` file defines which solutions to export and their **expected versions**. It lives on the export branch at `exports/{date-token}/build.json`.
+
+```json
+{
+  "solutions": [
+    { "name": "CoreComponents", "version": "1.2.0.0" },
+    { "name": "CustomConnectors", "version": "1.0.3.0" },
+    { "name": "MainApp", "version": "2.1.0.0" }
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `solutions` | Ordered array of solutions to export. Order matters &mdash; the release pipeline deploys in this order (put dependencies first). |
+| `solutions[].name` | The solution's **unique name** as it appears in Power Platform (not the display name). |
+| `solutions[].version` | The **exact version** expected in the Dev environment. Must match the version in Dev's `Solution.xml`, or the export pipeline will fail. |
+
+**How versions work:**
+
+- The version in `build.json` must match the version in the Dev environment exactly
+- The export pipeline **reads** the version from Dev after unpack and **compares** it &mdash; it never writes or changes versions
+- If you increment a solution version in Dev, update `build.json` to match before the next export run
+- The release pipeline uses the same version from `build.json` to name artifact files and check target environments
+- Solution zip files are named `{name}_{version}.zip` (e.g., `CoreComponents_1.2.0.0.zip`)
+
+**Caching:** If a managed zip for the exact name + version already exists in `solutions/managed/`, the export pipeline skips re-exporting that solution and uses the cached file. This makes re-runs efficient when only some solutions have changed.
 
 ---
 
@@ -124,11 +250,13 @@ Imports a managed solution into the **Dev** environment. Runs automatically afte
    - **Application (client) ID**
    - **Directory (tenant) ID**
    - **Client secret value**
-5. In the [Power Platform Admin Center](https://admin.powerplatform.microsoft.com), register this app as an **Application User** in **both** your Pre-Dev and Dev environments with the **System Administrator** security role
+5. In the [Power Platform Admin Center](https://admin.powerplatform.microsoft.com), register this app as an **Application User** in **all** environments (Pre-Dev, Dev, QA, Stage, Prod) with the **System Administrator** security role
+
+> **Note:** You can use the same app registration across all environments, or create separate ones per environment for tighter access control.
 
 ### Step 3: Create Power Platform Service Connections
 
-Create a service connection for **each** environment used by the pipelines.
+Create a service connection for **each** environment that uses the ADO task-based approach (Pre-Dev and Dev).
 
 1. In your ADO project, go to **Project settings** > **Service connections** > **New service connection**
 2. Select **Power Platform**
@@ -139,8 +267,6 @@ Create a service connection for **each** environment used by the pipelines.
    - **Client Secret**: From Step 2
 4. Name and save the connection
 
-Create the following service connections:
-
 | Service Connection Name | Environment | Used By |
 |---|---|---|
 | `PowerPlatformPreDev` | Pre-Dev environment URL | Export Solution from Pre-Dev |
@@ -148,7 +274,67 @@ Create the following service connections:
 
 > **Tip:** If you use different names, update the corresponding variable in each pipeline YAML file.
 
-### Step 4: Create the Pipelines
+### Step 4: Create Variable Groups (Release Pipeline)
+
+The release pipeline uses **variable groups** to store per-environment credentials. Create one group for each target environment.
+
+1. Go to **Pipelines** > **Library** > **+ Variable group**
+2. Create three variable groups with the following names and variables:
+
+**`PowerPlatform-QA`**
+
+| Variable | Value | Secret? |
+|---|---|---|
+| `EnvironmentUrl` | `https://yourorg-qa.crm.dynamics.com` | No |
+| `ClientId` | Application (Client) ID | No |
+| `ClientSecret` | Client secret value | **Yes** |
+| `TenantId` | Directory (Tenant) ID | No |
+
+**`PowerPlatform-Stage`**
+
+| Variable | Value | Secret? |
+|---|---|---|
+| `EnvironmentUrl` | `https://yourorg-stage.crm.dynamics.com` | No |
+| `ClientId` | Application (Client) ID | No |
+| `ClientSecret` | Client secret value | **Yes** |
+| `TenantId` | Directory (Tenant) ID | No |
+
+**`PowerPlatform-Prod`**
+
+| Variable | Value | Secret? |
+|---|---|---|
+| `EnvironmentUrl` | `https://yourorg-prod.crm.dynamics.com` | No |
+| `ClientId` | Application (Client) ID | No |
+| `ClientSecret` | Client secret value | **Yes** |
+| `TenantId` | Directory (Tenant) ID | No |
+
+3. On each variable group, click **Pipeline permissions** and authorize the release pipeline to use it
+
+### Step 5: Create ADO Environments (Release Pipeline)
+
+The release pipeline uses **ADO Environments** to gate deployments. Stage and Prod require manual approval checks.
+
+1. Go to **Pipelines** > **Environments** > **New environment**
+2. Create three environments:
+
+| Environment Name | Approval Check |
+|---|---|
+| `Power Platform QA` | None (deploys automatically) |
+| `Power Platform Stage` | **Add approval check** &mdash; select approver(s) |
+| `Power Platform Prod` | **Add approval check** &mdash; select approver(s) |
+
+**To add an approval check:**
+
+1. Click on the environment (e.g., `Power Platform Stage`)
+2. Click the **&vellip;** menu (top-right) > **Approvals and checks**
+3. Click **+ Add check** > **Approvals**
+4. Add one or more approvers (users or groups)
+5. Optionally set a timeout and instructions
+6. Click **Create**
+
+When the release pipeline reaches Stage or Prod, it will pause and notify the approvers. The stage only proceeds after approval.
+
+### Step 6: Create the Pipelines
 
 Register each pipeline in ADO:
 
@@ -160,17 +346,20 @@ Create pipelines in this order:
 
 | # | YAML File | Recommended Pipeline Name |
 |---|---|---|
-| 1 | `pipelines/export-solutions.yml` | Daily Export Solutions |
-| 2 | `pipelines/export-solution-predev.yml` | Export Solution from Pre-Dev |
-| 3 | `pipelines/deploy-solution-dev.yml` | Deploy Solution to Dev |
+| 1 | `pipelines/export-solutions.yml` | `export-solutions` |
+| 2 | `pipelines/release-solutions.yml` | `release-solutions` |
+| 3 | `pipelines/export-solution-predev.yml` | `Export Solution from Pre-Dev` |
+| 4 | `pipelines/deploy-solution-dev.yml` | `Deploy Solution to Dev` |
 
-> **Important:** The deploy pipeline references the export pipeline by name. The `source` value in `deploy-solution-dev.yml` must match the name you give to the `export-solution-predev.yml` pipeline in ADO. The default is `"Export Solution from Pre-Dev"`.
+> **Important:** Pipeline names matter for cross-pipeline triggers:
+> - The **release pipeline** references the export pipeline as `source: "export-solutions"`. The export pipeline's name in ADO must match this value.
+> - The **deploy-to-dev pipeline** references the pre-dev export as `source: "Export Solution from Pre-Dev"`. Update if your pipeline name differs.
 
-### Step 5: Configure Secret Variables (Daily Export Pipeline Only)
+### Step 7: Configure Secret Variables (Daily Export Pipeline Only)
 
-The **Daily Export Solutions** pipeline (`export-solutions.yml`) requires secret variables for pac CLI authentication. The other two pipelines use service connections exclusively and do **not** need secret variables.
+The **Daily Export Solutions** pipeline (`export-solutions.yml`) requires secret variables for pac CLI authentication. The other pipelines use service connections or variable groups.
 
-1. Open the **Daily Export Solutions** pipeline and click **Edit**
+1. Open the `export-solutions` pipeline and click **Edit**
 2. Click **Variables** (top-right) > **New variable**
 3. Add each of the following, checking **Keep this value secret** for `ClientSecret`:
 
@@ -184,9 +373,9 @@ The **Daily Export Solutions** pipeline (`export-solutions.yml`) requires secret
 
 > **Tip:** For managing these across multiple pipelines, create a **Variable Group** under **Pipelines** > **Library** and link it to the pipeline instead.
 
-### Step 6: Update Pipeline Variables
+### Step 8: Update Pipeline Variables
 
-Edit each pipeline YAML and update the service connection names if they differ from the defaults:
+Edit each pipeline YAML and update the service connection names and environment URLs if they differ from the defaults:
 
 **`pipelines/export-solutions.yml`:**
 ```yaml
@@ -211,7 +400,7 @@ variables:
     value: "PowerPlatformDev"            # <-- your Dev service connection
 ```
 
-### Step 7: Grant Repository Permissions
+### Step 9: Grant Repository Permissions
 
 The pipeline's build service identity needs permissions to push commits and create PRs.
 
@@ -235,7 +424,7 @@ The daily pipeline runs automatically every day at **10:00 PM ET**. No action is
 - Skip gracefully (with a warning) if no matching branch is found
 - Process all solutions and merge if a branch is found
 
-To set up an export run, create a branch and build.json:
+**To set up an export run**, create a branch and `build.json`:
 
 ```bash
 git checkout main && git pull
@@ -248,8 +437,8 @@ Create `exports/2026-02-15-sprint42/build.json`:
 ```json
 {
   "solutions": [
-    "MySolution",
-    "MyOtherSolution"
+    { "name": "CoreComponents", "version": "1.2.0.0" },
+    { "name": "MainApp", "version": "2.1.0.0" }
   ]
 }
 ```
@@ -260,9 +449,22 @@ git commit -m "configure export for 2026-02-15-sprint42"
 git push -u origin export/2026-02-15-sprint42
 ```
 
-### Export from Pre-Dev + Deploy to Dev (On-Demand)
+**To run manually:** Go to **Pipelines** > select `export-solutions` > **Run pipeline**. Optionally override the export branch or date.
 
-This is the simplest way to promote a solution from Pre-Dev to Dev:
+### Release Pipeline (Automatic + Manual Approval)
+
+The release pipeline triggers automatically after the export pipeline completes. No manual action is needed for the QA stage.
+
+**For Stage and Prod:**
+
+1. After QA completes successfully, approvers will receive a notification
+2. Go to **Pipelines** > select the running release pipeline
+3. Click **Review** on the Stage or Prod stage
+4. Click **Approve** to proceed
+
+The pipeline will skip any solution already installed at the target version in the environment.
+
+### Export from Pre-Dev + Deploy to Dev (On-Demand)
 
 1. Go to **Pipelines** in your ADO project
 2. Select the **Export Solution from Pre-Dev** pipeline
@@ -270,13 +472,7 @@ This is the simplest way to promote a solution from Pre-Dev to Dev:
 4. Enter the **Solution unique name** (exactly as it appears in Power Platform)
 5. Click **Run**
 
-That's it. The pipeline will:
-1. Export the solution from Pre-Dev
-2. Unpack, commit, and pack it as managed
-3. Automatically trigger the **Deploy Solution to Dev** pipeline
-4. The deploy pipeline imports the managed solution into Dev
-
-No need to run the deploy pipeline manually &mdash; it triggers automatically when the export completes.
+The pipeline will export from Pre-Dev, unpack, commit, pack as managed, and automatically trigger deployment to Dev.
 
 ### Deploy to Dev (Manual)
 
@@ -289,14 +485,22 @@ If you need to re-deploy a solution that's already been exported and committed:
 
 ### Verifying Results
 
-After a successful export + deploy:
+**After a daily export:**
 
 | Where | What to Check |
 |---|---|
+| **Pipeline logs** | Version validation passed for each solution |
 | **Repository** | `solutions/unpacked/{name}/` has the latest source files |
-| **Repository** | `solutions/unmanaged/{name}.zip` has the unmanaged export |
-| **Repository** | `solutions/managed/{name}.zip` has the managed package |
-| **Dev environment** | Solution is imported and visible in the maker portal |
+| **Repository** | `solutions/unmanaged/{name}_{version}.zip` has the versioned unmanaged export |
+| **Repository** | `solutions/managed/{name}_{version}.zip` has the versioned managed package |
+| **Pull Requests** | A PR was created and auto-completed (or is awaiting policy checks) |
+
+**After a release deployment:**
+
+| Where | What to Check |
+|---|---|
+| **Pipeline logs** | Each solution shows "Successfully deployed" or "Already installed — skipping" |
+| **Target environment** | Solutions are visible in the Power Platform maker portal at the expected versions |
 
 ---
 
@@ -331,10 +535,25 @@ Common examples:
 |---|---|---|
 | Pipeline skips with "No export branch found" | No branch matching `export/{today}-*` exists | Create the export branch and push it before the scheduled run |
 | "build.json not found" | The `exports/{subfolder}/build.json` file is missing on the export branch | Ensure the file path matches the branch name (minus the `export/` prefix) |
+| "Version mismatch for '...'" | The solution version in Dev doesn't match the version in `build.json` | Update `build.json` to match the current version in Dev, or update the version in Dev to match `build.json` |
 | "Failed to authenticate with Power Platform" | Secret variables are missing or incorrect | Verify `ClientId`, `ClientSecret`, and `TenantId` in pipeline variables |
 | "Failed to export solution" | Solution name doesn't match, or SPN lacks permissions | Verify the solution unique name in Power Platform and the app user's security role |
-| "Failed to create Pull Request" | Build service lacks repo permissions | Grant Contribute and Create PR permissions (see Step 7) |
+| "Failed to create Pull Request" | Build service lacks repo permissions | Grant Contribute and Create PR permissions (see Step 9) |
 | PR created but not auto-completing | Branch policies require human reviewers | Either add an exception for the build service or manually complete the PR |
+
+### Release Solutions
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Release pipeline doesn't trigger | Export pipeline name mismatch | Ensure the export pipeline is named `export-solutions` in ADO (must match `source` in `release-solutions.yml`) |
+| Release pipeline doesn't trigger | Export didn't run on `main` | The release only triggers when the export pipeline runs against the `main` branch |
+| "build.json not found in artifact" | Export pipeline didn't publish artifacts | Check the export pipeline logs &mdash; it may have skipped (no export branch found) or failed before artifact publishing |
+| "Failed to authenticate" in a stage | Variable group misconfigured | Verify the variable group for that stage has correct `EnvironmentUrl`, `ClientId`, `ClientSecret`, and `TenantId` |
+| "Failed to list solutions" | SPN lacks read access to target environment | Ensure the app user has System Administrator or System Customizer role in the target environment |
+| "Failed to import solution" | Missing dependencies, invalid solution, or insufficient permissions | Check the pipeline logs for the detailed Dataverse error. Common causes: a dependent solution is missing, version downgrade attempted, or SPN lacks import permissions |
+| Stage/Prod stuck waiting | No one has approved | Approvers need to go to the pipeline run and click **Approve** on the pending stage |
+| "Managed zip not found in artifact" | Artifact filename doesn't match build.json | Ensure solution names and versions in `build.json` match exactly (filenames are `{name}_{version}.zip`) |
+| Solutions always skipped | Already deployed at target version | This is expected behavior &mdash; the pipeline only deploys when the version changes |
 
 ### Export from Pre-Dev / Deploy to Dev
 
@@ -346,4 +565,4 @@ Common examples:
 | Deploy pipeline doesn't trigger | Trigger branch filter | The export pipeline must run against `main` branch to trigger the deploy |
 | Deploy fails with auth error | Service connection misconfigured | Verify the `PowerPlatformDev` service connection has the correct Dev environment URL, tenant, app ID, and secret |
 | Manual deploy says "solution not found" | Solution not in repo | Run the export pipeline first, or verify `solutions/managed/{name}.zip` exists in the repo |
-| "Failed to push changes" | Build service lacks Contribute permission | Grant the Build Service account **Contribute** permission on the repository (see Step 7) |
+| "Failed to push changes" | Build service lacks Contribute permission | Grant the Build Service account **Contribute** permission on the repository (see Step 9) |
