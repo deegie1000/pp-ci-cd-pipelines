@@ -262,6 +262,18 @@ steps:
           Write-Host "  Skipping export — using cached version."
           Copy-Item -Path $existingManagedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
           Write-Host "  Staged existing managed zip for artifact publishing."
+
+          # Check unpacked source for cloud flows (already in repo from prior export)
+          $cachedUnpackDir = Join-Path $unpackedDir $name
+          $cachedWorkflowsDir = Join-Path $cachedUnpackDir "Workflows"
+          if ((Test-Path $cachedWorkflowsDir)) {
+            $cachedFlowFiles = Get-ChildItem -Path $cachedWorkflowsDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+            if ($cachedFlowFiles -and $cachedFlowFiles.Count -gt 0) {
+              Write-Host "  Cloud flows detected (cached): $($cachedFlowFiles.Count) .json file(s)"
+              $solution | Add-Member -NotePropertyName "includesCloudFlows" -NotePropertyValue $true -Force
+            }
+          }
+
           Write-Host "`n  Solution '$name' (v$version) — cached, no re-export needed."
           $cachedSolutions += $name
           continue
@@ -311,6 +323,22 @@ steps:
           continue
         }
         Write-Host "  Unpack complete."
+
+        # -----------------------------------------------------------------
+        # Detect cloud flows in the unpacked solution
+        # -----------------------------------------------------------------
+        $workflowsDir = Join-Path $solutionUnpackDir "Workflows"
+        if (Test-Path $workflowsDir) {
+          $cloudFlowFiles = Get-ChildItem -Path $workflowsDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+          if ($cloudFlowFiles -and $cloudFlowFiles.Count -gt 0) {
+            Write-Host "  Cloud flows detected: $($cloudFlowFiles.Count) .json file(s) in Workflows/"
+            $solution | Add-Member -NotePropertyName "includesCloudFlows" -NotePropertyValue $true -Force
+          } else {
+            Write-Host "  No cloud flows detected in Workflows/"
+          }
+        } else {
+          Write-Host "  No Workflows/ directory — no cloud flows"
+        }
 
         # -----------------------------------------------------------------
         # Validate solution version in dev matches build.json
@@ -367,9 +395,13 @@ steps:
       }
 
       # -----------------------------------------------------------------
-      # Stage build.json as artifact (unmodified — versions already verified)
+      # Write updated build.json (with includesCloudFlows flags) and stage
       # -----------------------------------------------------------------
       $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
+      $updatedConfig = @{ solutions = @($solutions) } | ConvertTo-Json -Depth 10
+      Set-Content -Path $buildJsonPath -Value $updatedConfig -Encoding UTF8
+      Write-Host "Updated build.json with cloud flow detection results."
+
       Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
       Write-Host "Staged build.json for artifact publishing."
 
@@ -404,6 +436,10 @@ steps:
         Write-Error "One or more solutions failed to process"
         exit 1
       }
+
+      # Update SolutionsList variable with cloud flow flags for downstream steps
+      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
+      Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
 
       Write-Host "All solutions processed successfully."
     displayName: "Export, unpack, and pack solutions"
@@ -450,20 +486,21 @@ steps:
       git config user.email "pipeline@dev.azure.com"
       git config user.name "Azure DevOps Pipeline"
 
-      # Stage solution files and deployment settings
+      # Stage solution files, deployment settings, and updated build.json
       git add solutions/
       git add deploymentSettings/
+      git add "exports/$(ExportSubfolder)/build.json"
 
       # Check for changes
-      $status = git status --porcelain solutions/ deploymentSettings/
+      $status = git status --porcelain solutions/ deploymentSettings/ "exports/$(ExportSubfolder)/build.json"
       if (-not $status) {
-        Write-Host "No changes detected in solutions/ or deploymentSettings/ directories."
+        Write-Host "No changes detected in solutions/, deploymentSettings/, or build.json."
         Write-Host "##vso[task.setvariable variable=HasChanges]false"
         exit 0
       }
 
       Write-Host "Changes detected:"
-      git status --short solutions/ deploymentSettings/
+      git status --short solutions/ deploymentSettings/ "exports/$(ExportSubfolder)/"
 
       Write-Host "##vso[task.setvariable variable=HasChanges]true"
 

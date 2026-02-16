@@ -28,7 +28,8 @@ pp-ci-cd-pipelines/
 │   └── Merge-DeploymentSettings.ps1     # Merges export settings into root folder
 ├── tests/
 │   ├── Merge-DeploymentSettings.Tests.ps1  # Pester tests for merge logic
-│   └── Build-Json-Validation.Tests.ps1     # Pester tests for build.json validation
+│   ├── Build-Json-Validation.Tests.ps1     # Pester tests for build.json validation
+│   └── Cloud-Flow-Detection.Tests.ps1      # Pester tests for cloud flow detection
 ├── solutions/
 │   ├── unpacked/{SolutionName}/         # Unpacked solution source files
 │   ├── unmanaged/{SolutionName}_v.zip   # Versioned unmanaged solution zips
@@ -63,9 +64,10 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - Checks if a managed zip already exists for this name + version (cache check &mdash; skips if so)
    - Exports the **unmanaged** solution zip from Power Platform &rarr; `solutions/unmanaged/`
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
+   - **Detects cloud flows**: checks for `.json` files in the unpacked `Workflows/` directory. If found, sets `includesCloudFlows: true` on the solution entry in `build.json`
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Publishes managed zips, `build.json`, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
+4. Writes the updated `build.json` (with `includesCloudFlows` flags) and publishes it along with managed zips and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
 5. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
 6. Commits solution files and merged deployment settings, then pushes to the export branch
 7. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
@@ -227,6 +229,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions[].name` | The solution's **unique name** as it appears in Power Platform (not the display name). |
 | `solutions[].version` | The **exact version** expected in the Dev environment. Must match the version in Dev's `Solution.xml`, or the export pipeline will fail. |
 | `solutions[].includeDeploymentSettings` | Optional boolean (default: `false`). If `true`, the release pipeline will apply a deployment settings file (`deploymentSettings_{stage}.json`) when importing this solution. Only one solution should have this set to `true`. |
+| `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
 
 **How versions work:**
 
@@ -360,6 +363,7 @@ Invoke-Pester tests/ -Output Detailed
 |---|---|
 | `Merge-DeploymentSettings.Tests.ps1` | Merge logic: new items appended, existing items overwritten by export, multiple environment files processed independently, empty arrays preserved |
 | `Build-Json-Validation.Tests.ps1` | `build.json` validation: required fields, `includeDeploymentSettings` defaults to false, only one solution may have it set to true |
+| `Cloud-Flow-Detection.Tests.ps1` | Cloud flow detection: `.json` files in `Workflows/` detected, `.xaml`-only and empty directories return false, `includesCloudFlows` flag round-trip through `build.json` serialization |
 
 ---
 
