@@ -472,22 +472,22 @@ steps:
         targetRefName = "refs/heads/main"
         title         = "Export Power Platform Solutions - $(ExportSubfolder)"
         description   = @"
-      ## Automated Solution Export
+## Automated Solution Export
 
-      **Branch:** ``$(ExportBranch)``
-      **Date:** $(ExportSubfolder)
+**Branch:** ``$(ExportBranch)``
+**Date:** $(ExportSubfolder)
 
-      ### Solutions Exported
-      $solutionBullets
+### Solutions Exported
+$solutionBullets
 
-      ### Contents
-      - ``solutions/unmanaged/`` - Unmanaged solution zip files
-      - ``solutions/unpacked/``  - Unpacked solution source (clean unpack)
-      - ``solutions/managed/``   - Managed solution zip files
+### Contents
+- ``solutions/unmanaged/`` - Unmanaged solution zip files
+- ``solutions/unpacked/``  - Unpacked solution source (clean unpack)
+- ``solutions/managed/``   - Managed solution zip files
 
-      ---
-      *This PR was created automatically by the export-solutions pipeline.*
-      "@
+---
+*This PR was created automatically by the export-solutions pipeline.*
+"@
       } | ConvertTo-Json -Depth 5
 
       $createUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests?api-version=7.1"
