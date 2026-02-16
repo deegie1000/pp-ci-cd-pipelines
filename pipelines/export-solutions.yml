@@ -309,28 +309,36 @@ steps:
         Write-Host "  Unpack complete."
 
         # -----------------------------------------------------------------
-        # Read actual solution version from the unpacked Solution.xml
+        # Validate solution version in dev matches build.json
         # -----------------------------------------------------------------
         $solutionXmlPath = Join-Path $solutionUnpackDir "Other/Solution.xml"
-        if (Test-Path $solutionXmlPath) {
-          [xml]$solutionXml = Get-Content $solutionXmlPath
-          $actualVersion = $solutionXml.ImportExportXml.SolutionManifest.Version
-          Write-Host "  Solution version (from dev): $actualVersion"
-          $solution.version = $actualVersion
-        } else {
-          $actualVersion = $version
-          Write-Host "##vso[task.logissue type=warning]Could not read version - Solution.xml not found at: $solutionXmlPath"
+        if (-not (Test-Path $solutionXmlPath)) {
+          Write-Error "Solution.xml not found at: $solutionXmlPath — cannot verify version"
+          $failedSolutions += $name
+          continue
         }
 
+        [xml]$solutionXml = Get-Content $solutionXmlPath
+        $actualVersion = $solutionXml.ImportExportXml.SolutionManifest.Version
+        Write-Host "  Version in dev environment: $actualVersion"
+        Write-Host "  Version in build.json:      $version"
+
+        if ($actualVersion -ne $version) {
+          Write-Error "Version mismatch for '$name': build.json specifies v$version but dev environment has v$actualVersion. Update build.json to match the dev environment before re-running."
+          $failedSolutions += $name
+          continue
+        }
+        Write-Host "  Version check passed."
+
         # Rename unmanaged zip to include version
-        $versionedUnmanagedZip = Join-Path $unmanagedDir "${name}_${actualVersion}.zip"
+        $versionedUnmanagedZip = Join-Path $unmanagedDir "${name}_${version}.zip"
         Move-Item -Path $unmanagedZip -Destination $versionedUnmanagedZip -Force
         Write-Host "  Renamed unmanaged zip: $versionedUnmanagedZip"
 
         # -----------------------------------------------------------------
         # Pack as managed solution (with version in filename)
         # -----------------------------------------------------------------
-        $managedZip = Join-Path $managedDir "${name}_${actualVersion}.zip"
+        $managedZip = Join-Path $managedDir "${name}_${version}.zip"
         Write-Host "`nPacking managed solution..."
         Write-Host "  Target: $managedZip"
 
@@ -348,24 +356,18 @@ steps:
         Write-Host "  Managed pack complete."
 
         # Copy managed zip to artifact staging directory
-        Copy-Item -Path $managedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${actualVersion}.zip"
+        Copy-Item -Path $managedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
         Write-Host "  Staged managed zip for artifact publishing."
 
-        Write-Host "`n  Solution '$name' (v$actualVersion) processed successfully."
+        Write-Host "`n  Solution '$name' (v$version) processed successfully."
       }
 
       # -----------------------------------------------------------------
-      # Update build.json with actual versions from dev and stage for artifact
+      # Stage build.json as artifact (unmodified — versions already verified)
       # -----------------------------------------------------------------
       $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
-      $updatedConfig = @{ solutions = @($solutions | ForEach-Object { @{ name = $_.name; version = $_.version } }) }
-      $updatedConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $buildJsonPath
       Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
-      Write-Host "Updated build.json with versions from dev environment."
-
-      # Update SolutionsList variable with actual versions for PR description
-      $solutionsJson = ($solutions | ConvertTo-Json -Compress)
-      Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
+      Write-Host "Staged build.json for artifact publishing."
 
       Write-Host ""
       Write-Host "============================================"
@@ -410,20 +412,19 @@ steps:
       git config user.email "pipeline@dev.azure.com"
       git config user.name "Azure DevOps Pipeline"
 
-      # Stage solution files and updated build.json (with versions from dev)
+      # Stage solution files
       git add solutions/
-      git add "exports/$(ExportSubfolder)/build.json"
 
       # Check for changes
-      $status = git status --porcelain
+      $status = git status --porcelain solutions/
       if (-not $status) {
-        Write-Host "No changes detected."
+        Write-Host "No changes detected in solutions/ directory."
         Write-Host "##vso[task.setvariable variable=HasChanges]false"
         exit 0
       }
 
       Write-Host "Changes detected:"
-      git status --short
+      git status --short solutions/
 
       Write-Host "##vso[task.setvariable variable=HasChanges]true"
 
