@@ -119,16 +119,20 @@ steps:
           exit 0
         }
 
-        $branchLines = @($refs -split "`n" | Where-Object { $_.Trim() })
+        # Extract branch names and sort alphabetically
+        $branchNames = @($refs -split "`n" |
+          Where-Object { $_.Trim() } |
+          ForEach-Object { ($_ -split "refs/heads/")[1].Trim() } |
+          Sort-Object)
 
-        if ($branchLines.Count -gt 1) {
-          Write-Host "##vso[task.logissue type=warning]Multiple export branches found for $targetDate. Using the first match."
-          foreach ($line in $branchLines) {
-            Write-Host "  Found: $line"
+        if ($branchNames.Count -gt 1) {
+          Write-Host "##vso[task.logissue type=warning]Multiple export branches found for $targetDate. Using the last alphabetically."
+          foreach ($name in $branchNames) {
+            Write-Host "  Found: $name"
           }
         }
 
-        $exportBranch = ($branchLines[0] -split "refs/heads/")[1].Trim()
+        $exportBranch = $branchNames[-1]
         Write-Host "Detected export branch: $exportBranch"
       }
 
