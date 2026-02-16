@@ -170,10 +170,32 @@ stages:
                       # Import managed solution
                       Write-Host "  Importing managed solution..."
 
-                      pac solution import `
-                        --path $zipPath `
-                        --force-overwrite `
-                        --activate-plugins
+                      # Check for deployment settings
+                      $importArgs = @(
+                        "solution", "import",
+                        "--path", $zipPath,
+                        "--force-overwrite",
+                        "--activate-plugins"
+                      )
+
+                      $includeSettings = $false
+                      if ($solution.PSObject.Properties["includeDeploymentSettings"]) {
+                        $includeSettings = [bool]$solution.includeDeploymentSettings
+                      }
+
+                      if ($includeSettings) {
+                        $settingsFile = Join-Path $artifactDir "deploymentSettings_${{ parameters.stageName }}.json"
+                        if (Test-Path $settingsFile) {
+                          Write-Host "  Using deployment settings: deploymentSettings_${{ parameters.stageName }}.json"
+                          $importArgs += @("--settings-file", $settingsFile)
+                        } else {
+                          Write-Error "includeDeploymentSettings is true for '$name' but deploymentSettings_${{ parameters.stageName }}.json was not found in artifact"
+                          $failedSolutions += $name
+                          continue
+                        }
+                      }
+
+                      & pac @importArgs
 
                       if ($LASTEXITCODE -ne 0) {
                         Write-Error "Failed to import solution: $name"

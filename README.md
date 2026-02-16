@@ -15,7 +15,10 @@ pp-ci-cd-pipelines/
 │       └── deploy-environment.yml        # Reusable deploy template (used by release pipeline)
 ├── exports/
 │   └── {yyyy-MM-dd-token}/
-│       └── build.json                   # Export configuration per scheduled run
+│       ├── build.json                   # Export configuration per scheduled run
+│       ├── deploymentSettings_QA.json   # Deployment settings for QA (optional)
+│       ├── deploymentSettings_Stage.json # Deployment settings for Stage (optional)
+│       └── deploymentSettings_Prod.json  # Deployment settings for Prod (optional)
 ├── solutions/
 │   ├── unpacked/{SolutionName}/         # Unpacked solution source files
 │   ├── unmanaged/{SolutionName}_v.zip   # Versioned unmanaged solution zips
@@ -52,7 +55,7 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Publishes managed zips and `build.json` as pipeline artifacts (consumed by the release pipeline)
+4. Publishes managed zips, `build.json`, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
 5. Commits solution files and pushes to the export branch
 6. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
 
@@ -74,7 +77,7 @@ Update build.json to match the dev environment before re-running.
 
 **Auth:** Uses pac CLI with secret pipeline variables (`ClientId`, `ClientSecret`, `TenantId`).
 
-**Artifact published:** `ManagedSolutions` &mdash; contains `build.json` and `{SolutionName}_{version}.zip` files.
+**Artifact published:** `ManagedSolutions` &mdash; contains `build.json`, `{SolutionName}_{version}.zip` files, and any `deploymentSettings_*.json` files present in the export folder.
 
 ---
 
@@ -92,6 +95,7 @@ Deploys managed solutions through three environments in sequence: **QA &rarr; St
    - **Fresh install** &mdash; if the solution doesn't exist in the target environment
    - **Upgrade** &mdash; if the solution exists but at a different version
    - Imports as managed with `--force-overwrite --activate-plugins`
+   - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
 5. Fails the stage if any solution fails to deploy
 
 **Stages:**
@@ -170,6 +174,7 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │                          │    │  - Checks installed versions                │
 └──────────────────────────┘    │  - Skips if already at target version       │
                                 │  - Imports managed + force-overwrite        │
+                                │  - Applies deployment settings if enabled   │
                                 └─────────────────────────────────────────────┘
 ```
 
@@ -200,7 +205,7 @@ The `build.json` file defines which solutions to export and their **expected ver
   "solutions": [
     { "name": "CoreComponents", "version": "1.2.0.0" },
     { "name": "CustomConnectors", "version": "1.0.3.0" },
-    { "name": "MainApp", "version": "2.1.0.0" }
+    { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
   ]
 }
 ```
@@ -210,6 +215,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions` | Ordered array of solutions to export. Order matters &mdash; the release pipeline deploys in this order (put dependencies first). |
 | `solutions[].name` | The solution's **unique name** as it appears in Power Platform (not the display name). |
 | `solutions[].version` | The **exact version** expected in the Dev environment. Must match the version in Dev's `Solution.xml`, or the export pipeline will fail. |
+| `solutions[].includeDeploymentSettings` | Optional boolean (default: `false`). If `true`, the release pipeline will apply a deployment settings file (`deploymentSettings_{stage}.json`) when importing this solution. Only one solution should have this set to `true`. |
 
 **How versions work:**
 
@@ -220,6 +226,46 @@ The `build.json` file defines which solutions to export and their **expected ver
 - Solution zip files are named `{name}_{version}.zip` (e.g., `CoreComponents_1.2.0.0.zip`)
 
 **Caching:** If a managed zip for the exact name + version already exists in `solutions/managed/`, the export pipeline skips re-exporting that solution and uses the cached file. This makes re-runs efficient when only some solutions have changed.
+
+### Deployment Settings
+
+Deployment settings allow you to configure environment-specific values (such as connection references and environment variables) that get applied when importing a solution into a target environment.
+
+**How it works:**
+
+1. Set `"includeDeploymentSettings": true` on **one** solution in `build.json`
+2. Create deployment settings files in the **same folder** as `build.json`, named by environment:
+   - `deploymentSettings_QA.json`
+   - `deploymentSettings_Stage.json`
+   - `deploymentSettings_Prod.json`
+3. The export pipeline includes these files in the `ManagedSolutions` artifact automatically
+4. During deployment, the release pipeline passes the matching file to `pac solution import --settings-file`
+
+**Example deployment settings file** (`deploymentSettings_QA.json`):
+
+```json
+{
+  "EnvironmentVariables": [
+    {
+      "SchemaName": "cr5a4_SharedVariableName",
+      "Value": "qa-value"
+    }
+  ],
+  "ConnectionReferences": [
+    {
+      "LogicalName": "cr5a4_SharedConnectionRef",
+      "ConnectionId": "00000000-0000-0000-0000-000000000000",
+      "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps"
+    }
+  ]
+}
+```
+
+**Rules:**
+
+- Only **one** solution in `build.json` should have `includeDeploymentSettings: true`
+- If `includeDeploymentSettings` is omitted or `false`, no deployment settings are applied for that solution
+- If `includeDeploymentSettings` is `true` but the corresponding `deploymentSettings_{stage}.json` file is missing from the artifact, the deployment **fails** with an error
 
 ---
 
@@ -438,10 +484,12 @@ Create `exports/2026-02-15-sprint42/build.json`:
 {
   "solutions": [
     { "name": "CoreComponents", "version": "1.2.0.0" },
-    { "name": "MainApp", "version": "2.1.0.0" }
+    { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
   ]
 }
 ```
+
+If using deployment settings, create a settings file for each target environment in the same folder (e.g., `exports/2026-02-15-sprint42/deploymentSettings_QA.json`, `deploymentSettings_Stage.json`, `deploymentSettings_Prod.json`). See [Deployment Settings](#deployment-settings) for the file format.
 
 ```bash
 git add exports/
@@ -554,6 +602,7 @@ Common examples:
 | Stage/Prod stuck waiting | No one has approved | Approvers need to go to the pipeline run and click **Approve** on the pending stage |
 | "Managed zip not found in artifact" | Artifact filename doesn't match build.json | Ensure solution names and versions in `build.json` match exactly (filenames are `{name}_{version}.zip`) |
 | Solutions always skipped | Already deployed at target version | This is expected behavior &mdash; the pipeline only deploys when the version changes |
+| "includeDeploymentSettings is true but deploymentSettings_{stage}.json was not found" | Deployment settings file missing from artifact | Ensure the file exists in the same folder as `build.json` on the export branch (e.g., `exports/{date-token}/deploymentSettings_QA.json`) |
 
 ### Export from Pre-Dev / Deploy to Dev
 

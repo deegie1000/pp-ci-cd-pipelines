@@ -373,6 +373,18 @@ steps:
       Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
       Write-Host "Staged build.json for artifact publishing."
 
+      # -----------------------------------------------------------------
+      # Stage deployment settings files (if any solution uses them)
+      # -----------------------------------------------------------------
+      $exportFolder = Join-Path $sourceDir "exports/$(ExportSubfolder)"
+      $settingsFiles = Get-ChildItem -Path $exportFolder -Filter "deploymentSettings_*.json" -ErrorAction SilentlyContinue
+      if ($settingsFiles) {
+        foreach ($sf in $settingsFiles) {
+          Copy-Item -Path $sf.FullName -Destination "$(Build.ArtifactStagingDirectory)/$($sf.Name)"
+          Write-Host "Staged deployment settings file: $($sf.Name)"
+        }
+      }
+
       Write-Host ""
       Write-Host "============================================"
       Write-Host "  Processing Summary"
