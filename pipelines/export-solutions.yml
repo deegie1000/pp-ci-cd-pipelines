@@ -184,7 +184,7 @@ steps:
 
       Write-Host "Solutions to export ($($solutions.Count)):"
       foreach ($s in $solutions) {
-        Write-Host "  - $s"
+        Write-Host "  - $($s.name) (v$($s.version))"
       }
 
       # Pass solutions list as a JSON variable for subsequent steps
@@ -240,26 +240,29 @@ steps:
       $failedSolutions = @()
 
       foreach ($solution in $solutions) {
+        $name    = $solution.name
+        $version = $solution.version
+
         Write-Host ""
         Write-Host "============================================"
-        Write-Host "  Processing solution: $solution"
+        Write-Host "  Processing solution: $name (v$version)"
         Write-Host "============================================"
 
         # -----------------------------------------------------------------
         # Export unmanaged solution from Power Platform
         # -----------------------------------------------------------------
-        $unmanagedZip = Join-Path $unmanagedDir "$solution.zip"
+        $unmanagedZip = Join-Path $unmanagedDir "$name.zip"
         Write-Host "`nExporting unmanaged solution..."
         Write-Host "  Target: $unmanagedZip"
 
         pac solution export `
-          --name $solution `
+          --name $name `
           --path $unmanagedZip `
           --overwrite
 
         if ($LASTEXITCODE -ne 0) {
-          Write-Error "Failed to export solution: $solution"
-          $failedSolutions += $solution
+          Write-Error "Failed to export solution: $name"
+          $failedSolutions += $name
           continue
         }
         Write-Host "  Export complete."
@@ -267,7 +270,7 @@ steps:
         # -----------------------------------------------------------------
         # Clean unpack: delete existing folder, then unpack fresh
         # -----------------------------------------------------------------
-        $solutionUnpackDir = Join-Path $unpackedDir $solution
+        $solutionUnpackDir = Join-Path $unpackedDir $name
         Write-Host "`nUnpacking solution (clean)..."
         Write-Host "  Target: $solutionUnpackDir"
 
@@ -284,8 +287,8 @@ steps:
           --allowWrite true
 
         if ($LASTEXITCODE -ne 0) {
-          Write-Error "Failed to unpack solution: $solution"
-          $failedSolutions += $solution
+          Write-Error "Failed to unpack solution: $name"
+          $failedSolutions += $name
           continue
         }
         Write-Host "  Unpack complete."
@@ -293,7 +296,7 @@ steps:
         # -----------------------------------------------------------------
         # Pack as managed solution
         # -----------------------------------------------------------------
-        $managedZip = Join-Path $managedDir "$solution.zip"
+        $managedZip = Join-Path $managedDir "$name.zip"
         Write-Host "`nPacking managed solution..."
         Write-Host "  Target: $managedZip"
 
@@ -304,13 +307,13 @@ steps:
           --processCanvasApps
 
         if ($LASTEXITCODE -ne 0) {
-          Write-Error "Failed to pack managed solution: $solution"
-          $failedSolutions += $solution
+          Write-Error "Failed to pack managed solution: $name"
+          $failedSolutions += $name
           continue
         }
         Write-Host "  Managed pack complete."
 
-        Write-Host "`n  Solution '$solution' processed successfully."
+        Write-Host "`n  Solution '$name' (v$version) processed successfully."
       }
 
       Write-Host ""
@@ -389,7 +392,7 @@ steps:
 
       # Build solution list for PR description
       $solutions = "$(SolutionsList)" | ConvertFrom-Json
-      $solutionBullets = ($solutions | ForEach-Object { "- $_" }) -join "`n"
+      $solutionBullets = ($solutions | ForEach-Object { "- $($_.name) (v$($_.version))" }) -join "`n"
 
       # -----------------------------------------------------------------
       # Create the Pull Request

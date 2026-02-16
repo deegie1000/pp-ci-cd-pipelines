@@ -1,6 +1,6 @@
 {
   "solutions": [
-    "MySolution",
-    "MyOtherSolution"
+    { "name": "MySolution", "version": "1.0.0.0" },
+    { "name": "MyOtherSolution", "version": "1.0.0.0" }
   ]
 }
