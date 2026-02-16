@@ -91,68 +91,32 @@ steps:
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
+      $unpackDir = "$(Build.SourcesDirectory)/solutions/unpacked/${{ parameters.solutionName }}"
 
-      $solutionName = "${{ parameters.solutionName }}"
-      $unmanagedZip = "$(Build.SourcesDirectory)/solutions/unmanaged/$solutionName.zip"
-      $unpackDir    = "$(Build.SourcesDirectory)/solutions/unpacked/$solutionName"
-
-      Write-Host "============================================"
-      Write-Host "  Clean unpack: $solutionName"
-      Write-Host "============================================"
-
-      # Clean: remove existing unpacked folder for a fresh unpack
       if (Test-Path $unpackDir) {
         Write-Host "Removing existing unpacked folder: $unpackDir"
         Remove-Item -Path $unpackDir -Recurse -Force
       }
+    displayName: "Clean existing unpack folder"
 
-      Write-Host "Unpacking from: $unmanagedZip"
-      Write-Host "Unpacking to:   $unpackDir"
-
-      pac solution unpack `
-        --zipfile $unmanagedZip `
-        --folder $unpackDir `
-        --processCanvasApps `
-        --allowDelete true `
-        --allowWrite true
-
-      if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to unpack solution: $solutionName"
-        exit 1
-      }
-
-      Write-Host "Unpack complete."
-    displayName: "Clean unpack solution"
+  - task: PowerPlatformUnpackSolution@2
+    displayName: "Unpack solution"
+    inputs:
+      SolutionInputFile: $(Build.SourcesDirectory)/solutions/unmanaged/${{ parameters.solutionName }}.zip
+      SolutionTargetFolder: $(Build.SourcesDirectory)/solutions/unpacked/${{ parameters.solutionName }}
+      SolutionType: Unmanaged
+      ProcessCanvasApps: true
 
   # ===========================================================================
   # Step 6: Pack as managed solution
   # ===========================================================================
-  - pwsh: |
-      $ErrorActionPreference = "Stop"
-
-      $solutionName = "${{ parameters.solutionName }}"
-      $unpackDir    = "$(Build.SourcesDirectory)/solutions/unpacked/$solutionName"
-      $managedZip   = "$(Build.SourcesDirectory)/solutions/managed/$solutionName.zip"
-
-      Write-Host "============================================"
-      Write-Host "  Pack managed: $solutionName"
-      Write-Host "============================================"
-      Write-Host "Source folder: $unpackDir"
-      Write-Host "Output zip:   $managedZip"
-
-      pac solution pack `
-        --zipfile $managedZip `
-        --folder $unpackDir `
-        --type Managed `
-        --processCanvasApps
-
-      if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to pack managed solution: $solutionName"
-        exit 1
-      }
-
-      Write-Host "Managed pack complete."
+  - task: PowerPlatformPackSolution@2
     displayName: "Pack managed solution"
+    inputs:
+      SolutionSourceFolder: $(Build.SourcesDirectory)/solutions/unpacked/${{ parameters.solutionName }}
+      SolutionTargetFolder: $(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}.zip
+      SolutionType: Managed
+      ProcessCanvasApps: true
 
   # ===========================================================================
   # Step 7: Commit and push solution files to the repository
