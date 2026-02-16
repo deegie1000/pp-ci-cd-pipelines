@@ -66,8 +66,9 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
 4. Publishes managed zips, `build.json`, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
-5. Commits solution files and pushes to the export branch
-6. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
+5. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
+6. Commits solution files and merged deployment settings, then pushes to the export branch
+7. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
 
 **Version validation:** The pipeline does **not** modify solution versions in Dev or update `build.json`. The `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
 
@@ -180,10 +181,10 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │  4. Validate versions    │───►│  │         │  │         │  │            │ │
 │  5. Unpack + pack managed│    │  └─────────┘  └─────────┘  └────────────┘ │
 │  6. Publish artifact     │    │                                             │
-│  7. PR to main           │    │  Each stage:                                │
-│                          │    │  - Checks installed versions                │
-└──────────────────────────┘    │  - Skips if already at target version       │
-                                │  - Imports managed + force-overwrite        │
+│  7. Merge deploy settings│    │  Each stage:                                │
+│  8. PR to main           │    │  - Checks installed versions                │
+│                          │    │  - Skips if already at target version       │
+└──────────────────────────┘    │  - Imports managed + force-overwrite        │
                                 │  - Applies deployment settings if enabled   │
                                 └─────────────────────────────────────────────┘
 ```
@@ -262,6 +263,54 @@ The repository maintains a root `deploymentSettings/` folder that holds the accu
 5. The updated root files are committed to the export branch and included in the PR to `main`
 
 This ensures the root `deploymentSettings/` folder always reflects the latest configuration from every export run.
+
+**Merge example:**
+
+Suppose the root `deploymentSettings/deploymentSettings_QA.json` currently contains:
+
+```json
+{
+  "EnvironmentVariables": [
+    { "SchemaName": "cr5a4_ApiUrl", "Value": "https://old-api.example.com" },
+    { "SchemaName": "cr5a4_FeatureFlag", "Value": "false" }
+  ],
+  "ConnectionReferences": [
+    { "LogicalName": "cr5a4_DataverseConn", "ConnectionId": "aaa-111", "ConnectorId": "/apis/shared_cds" }
+  ]
+}
+```
+
+And an export run includes `exports/2026-02-15-sprint42/deploymentSettings_QA.json` with:
+
+```json
+{
+  "EnvironmentVariables": [
+    { "SchemaName": "cr5a4_ApiUrl", "Value": "https://new-api.example.com" },
+    { "SchemaName": "cr5a4_Timeout", "Value": "30" }
+  ],
+  "ConnectionReferences": []
+}
+```
+
+After the merge, the root file becomes:
+
+```json
+{
+  "EnvironmentVariables": [
+    { "SchemaName": "cr5a4_ApiUrl", "Value": "https://new-api.example.com" },
+    { "SchemaName": "cr5a4_FeatureFlag", "Value": "false" },
+    { "SchemaName": "cr5a4_Timeout", "Value": "30" }
+  ],
+  "ConnectionReferences": [
+    { "LogicalName": "cr5a4_DataverseConn", "ConnectionId": "aaa-111", "ConnectorId": "/apis/shared_cds" }
+  ]
+}
+```
+
+- `cr5a4_ApiUrl` was **overwritten** (matched by `SchemaName`, export value wins)
+- `cr5a4_FeatureFlag` was **preserved** (exists in root but not in export)
+- `cr5a4_Timeout` was **appended** (new item from export)
+- `cr5a4_DataverseConn` was **preserved** (export had an empty `ConnectionReferences` array)
 
 **Example deployment settings file** (`deploymentSettings_QA.json`):
 
@@ -633,6 +682,8 @@ Common examples:
 | "Failed to export solution" | Solution name doesn't match, or SPN lacks permissions | Verify the solution unique name in Power Platform and the app user's security role |
 | "Failed to create Pull Request" | Build service lacks repo permissions | Grant Contribute and Create PR permissions (see Step 9) |
 | PR created but not auto-completing | Branch policies require human reviewers | Either add an exception for the build service or manually complete the PR |
+| Root `deploymentSettings/` not updated | No `deploymentSettings_*.json` files in the export folder | The merge step only runs when settings files exist in `exports/{date-token}/`. If you need deployment settings, add them to the export folder before the pipeline runs |
+| Export overwrote a value I didn't expect | Export items overwrite matching root items by key | The merge uses `SchemaName` (env variables) and `LogicalName` (connection references) to match. If an export file contains an item with the same key as the root, the export value wins. Review the diff in the PR before merging to `main` |
 
 ### Release Solutions
 
