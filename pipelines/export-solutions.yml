@@ -238,6 +238,7 @@ steps:
       New-Item -ItemType Directory -Path $managedDir   -Force | Out-Null
 
       $failedSolutions = @()
+      $cachedSolutions = @()
 
       foreach ($solution in $solutions) {
         $name    = $solution.name
@@ -247,6 +248,20 @@ steps:
         Write-Host "============================================"
         Write-Host "  Processing solution: $name (v$version)"
         Write-Host "============================================"
+
+        # -----------------------------------------------------------------
+        # Check if managed zip already exists for this name + version
+        # -----------------------------------------------------------------
+        $existingManagedZip = Join-Path $managedDir "${name}_${version}.zip"
+        if (Test-Path $existingManagedZip) {
+          Write-Host "  Managed zip already exists: $existingManagedZip"
+          Write-Host "  Skipping export — using cached version."
+          Copy-Item -Path $existingManagedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
+          Write-Host "  Staged existing managed zip for artifact publishing."
+          Write-Host "`n  Solution '$name' (v$version) — cached, no re-export needed."
+          $cachedSolutions += $name
+          continue
+        }
 
         # -----------------------------------------------------------------
         # Export unmanaged solution from Power Platform
@@ -356,8 +371,15 @@ steps:
       Write-Host "============================================"
       Write-Host "  Processing Summary"
       Write-Host "============================================"
+      $exportedCount = $solutions.Count - $failedSolutions.Count - $cachedSolutions.Count
       Write-Host "Total solutions: $($solutions.Count)"
+      Write-Host "Exported:        $exportedCount"
+      Write-Host "Cached:          $($cachedSolutions.Count)"
       Write-Host "Failed:          $($failedSolutions.Count)"
+
+      if ($cachedSolutions.Count -gt 0) {
+        Write-Host "Cached solutions (skipped re-export): $($cachedSolutions -join ', ')"
+      }
 
       if ($failedSolutions.Count -gt 0) {
         Write-Host "Failed solutions: $($failedSolutions -join ', ')"
