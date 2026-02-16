@@ -420,7 +420,29 @@ steps:
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 9: Commit and push changes to the export branch
+  # Step 9: Merge export deployment settings into root deploymentSettings/
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $sourceDir = "$(Build.SourcesDirectory)"
+      $exportFolder = Join-Path $sourceDir "exports/$(ExportSubfolder)"
+      $rootFolder = Join-Path $sourceDir "deploymentSettings"
+      $mergeScript = Join-Path $sourceDir "scripts/Merge-DeploymentSettings.ps1"
+
+      # Only run if deployment settings files exist in the export folder
+      $settingsFiles = Get-ChildItem -Path $exportFolder -Filter "deploymentSettings_*.json" -ErrorAction SilentlyContinue
+      if (-not $settingsFiles -or $settingsFiles.Count -eq 0) {
+        Write-Host "No deployment settings files in export folder. Skipping merge."
+        exit 0
+      }
+
+      & $mergeScript -ExportFolder $exportFolder -RootFolder $rootFolder
+    displayName: "Merge deployment settings into root"
+    condition: eq(variables['ExportBranchFound'], 'true')
+
+  # ===========================================================================
+  # Step 10: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -428,19 +450,20 @@ steps:
       git config user.email "pipeline@dev.azure.com"
       git config user.name "Azure DevOps Pipeline"
 
-      # Stage solution files
+      # Stage solution files and deployment settings
       git add solutions/
+      git add deploymentSettings/
 
       # Check for changes
-      $status = git status --porcelain solutions/
+      $status = git status --porcelain solutions/ deploymentSettings/
       if (-not $status) {
-        Write-Host "No changes detected in solutions/ directory."
+        Write-Host "No changes detected in solutions/ or deploymentSettings/ directories."
         Write-Host "##vso[task.setvariable variable=HasChanges]false"
         exit 0
       }
 
       Write-Host "Changes detected:"
-      git status --short solutions/
+      git status --short solutions/ deploymentSettings/
 
       Write-Host "##vso[task.setvariable variable=HasChanges]true"
 
@@ -461,7 +484,7 @@ steps:
     condition: eq(variables['ExportBranchFound'], 'true')
 
   # ===========================================================================
-  # Step 10: Create a Pull Request and auto-complete (merge) into main
+  # Step 11: Create a Pull Request and auto-complete (merge) into main
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"

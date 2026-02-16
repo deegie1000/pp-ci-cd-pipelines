@@ -13,12 +13,22 @@ pp-ci-cd-pipelines/
 │   ├── deploy-solution-dev.yml          # Auto-triggered deploy to Dev
 │   └── templates/
 │       └── deploy-environment.yml        # Reusable deploy template (used by release pipeline)
+├── deploymentSettings/
+│   ├── deploymentSettings_Dev.json      # Accumulated deployment settings for Dev
+│   ├── deploymentSettings_QA.json       # Accumulated deployment settings for QA
+│   ├── deploymentSettings_Stage.json    # Accumulated deployment settings for Stage
+│   └── deploymentSettings_Prod.json     # Accumulated deployment settings for Prod
 ├── exports/
 │   └── {yyyy-MM-dd-token}/
 │       ├── build.json                   # Export configuration per scheduled run
 │       ├── deploymentSettings_QA.json   # Deployment settings for QA (optional)
 │       ├── deploymentSettings_Stage.json # Deployment settings for Stage (optional)
 │       └── deploymentSettings_Prod.json  # Deployment settings for Prod (optional)
+├── scripts/
+│   └── Merge-DeploymentSettings.ps1     # Merges export settings into root folder
+├── tests/
+│   ├── Merge-DeploymentSettings.Tests.ps1  # Pester tests for merge logic
+│   └── Build-Json-Validation.Tests.ps1     # Pester tests for build.json validation
 ├── solutions/
 │   ├── unpacked/{SolutionName}/         # Unpacked solution source files
 │   ├── unmanaged/{SolutionName}_v.zip   # Versioned unmanaged solution zips
@@ -241,6 +251,18 @@ Deployment settings allow you to configure environment-specific values (such as 
 3. The export pipeline includes these files in the `ManagedSolutions` artifact automatically
 4. During deployment, the release pipeline passes the matching file to `pac solution import --settings-file`
 
+**Root `deploymentSettings/` folder:**
+
+The repository maintains a root `deploymentSettings/` folder that holds the accumulated set of deployment settings across all export runs. During the export pipeline, before the PR is created:
+
+1. The pipeline runs `scripts/Merge-DeploymentSettings.ps1`
+2. For each `deploymentSettings_{env}.json` in the export folder, items are merged into the corresponding root file
+3. **Matching items are overwritten** &mdash; `EnvironmentVariables` are matched by `SchemaName`, `ConnectionReferences` by `LogicalName`
+4. **New items are appended** to the root file
+5. The updated root files are committed to the export branch and included in the PR to `main`
+
+This ensures the root `deploymentSettings/` folder always reflects the latest configuration from every export run.
+
 **Example deployment settings file** (`deploymentSettings_QA.json`):
 
 ```json
@@ -266,6 +288,29 @@ Deployment settings allow you to configure environment-specific values (such as 
 - Only **one** solution in `build.json` should have `includeDeploymentSettings: true`
 - If `includeDeploymentSettings` is omitted or `false`, no deployment settings are applied for that solution
 - If `includeDeploymentSettings` is `true` but the corresponding `deploymentSettings_{stage}.json` file is missing from the artifact, the deployment **fails** with an error
+
+---
+
+## Testing
+
+The repository includes [Pester](https://pester.dev) unit tests for the deployment settings logic. Tests are in the `tests/` folder.
+
+**Running the tests:**
+
+```powershell
+# Install Pester (if not already available)
+Install-Module -Name Pester -Force -Scope CurrentUser
+
+# Run all tests
+Invoke-Pester tests/ -Output Detailed
+```
+
+**Test suites:**
+
+| File | What it tests |
+|---|---|
+| `Merge-DeploymentSettings.Tests.ps1` | Merge logic: new items appended, existing items overwritten by export, multiple environment files processed independently, empty arrays preserved |
+| `Build-Json-Validation.Tests.ps1` | `build.json` validation: required fields, `includeDeploymentSettings` defaults to false, only one solution may have it set to true |
 
 ---
 
