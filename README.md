@@ -102,15 +102,17 @@ Deploys managed solutions through three environments in sequence: **QA &rarr; St
 **What it does (per stage):**
 
 1. Downloads the `ManagedSolutions` artifact from the export pipeline
-2. Authenticates with the target environment using credentials from a per-environment variable group
-3. Queries all installed solutions in the target environment using `pac solution list`
-4. For each solution in `build.json` (in order):
+2. **Validates all artifacts upfront** &mdash; checks that every `{name}_{version}.zip` (and required `deploymentSettings_{stage}.json`) exists before importing anything. Fails immediately if any are missing
+3. Authenticates with the target environment using credentials from a per-environment variable group
+4. Queries all installed solutions in the target environment using `pac solution list`
+5. For each solution in `build.json` (in order):
    - **Skip** &mdash; if the solution is already installed at the target version
    - **Fresh install** &mdash; if the solution doesn't exist in the target environment
    - **Upgrade** &mdash; if the solution exists but at a different version
    - Imports as managed with `--force-overwrite --activate-plugins`
    - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
-5. Fails the stage if any solution fails to deploy
+   - If the solution has `includesCloudFlows: true`, checks for inactive cloud flows after import and attempts to activate them. Activation failures are logged as **warnings** but do not fail the deployment
+6. Fails the stage if any solution fails to deploy
 
 **Stages:**
 
@@ -186,10 +188,12 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │  5. Unpack + pack managed│    │  └─────────┘  └─────────┘  └────────────┘ │
 │  6. Publish artifact     │    │                                             │
 │  7. Merge deploy settings│    │  Each stage:                                │
-│  8. PR to main           │    │  - Checks installed versions                │
-│                          │    │  - Skips if already at target version       │
-└──────────────────────────┘    │  - Imports managed + force-overwrite        │
+│  8. PR to main           │    │  - Validates all artifacts upfront           │
+│                          │    │  - Checks installed versions                │
+└──────────────────────────┘    │  - Skips if already at target version       │
+                                │  - Imports managed + force-overwrite        │
                                 │  - Applies deployment settings if enabled   │
+                                │  - Activates cloud flows (warn on failure)  │
                                 └─────────────────────────────────────────────┘
 ```
 
@@ -649,7 +653,9 @@ If you need to re-deploy a solution that's already been exported and committed:
 | Where | What to Check |
 |---|---|
 | **Pipeline logs** | Each solution shows "Successfully deployed" or "Already installed — skipping" |
+| **Pipeline logs** | Cloud flow activation: look for "activated successfully" or warning messages for flows that couldn't be turned on |
 | **Target environment** | Solutions are visible in the Power Platform maker portal at the expected versions |
+| **Target environment** | Cloud flows are turned on (check Power Automate portal &mdash; some may need manual activation if warnings appeared) |
 
 ---
 
@@ -706,6 +712,9 @@ Common examples:
 | "Managed zip not found in artifact" | Artifact filename doesn't match build.json | Ensure solution names and versions in `build.json` match exactly (filenames are `{name}_{version}.zip`) |
 | Solutions always skipped | Already deployed at target version | This is expected behavior &mdash; the pipeline only deploys when the version changes |
 | "includeDeploymentSettings is true but deploymentSettings_{stage}.json was not found" | Deployment settings file missing from artifact | Ensure the file exists in the same folder as `build.json` on the export branch (e.g., `exports/{date-token}/deploymentSettings_QA.json`) |
+| "Artifact validation failed" | One or more solution zips or deployment settings files missing from artifact | The pipeline validates all artifacts upfront before importing anything. Ensure all solutions in `build.json` were exported successfully and all required `deploymentSettings_*.json` files exist |
+| "Failed to activate flow" warning | Cloud flow could not be turned on after import | Common causes: connection references not resolved, SPN lacks access to the underlying connections, or flow suspended by DLP policy. Manually activate the flow in the Power Automate portal or resolve the underlying issue |
+| "Could not acquire Dataverse API token" warning | OAuth token request for flow activation failed | Verify `ClientId`, `ClientSecret`, and `TenantId` are correct. Solution imports are not affected &mdash; only flow activation is skipped |
 
 ### Export from Pre-Dev / Deploy to Dev
 

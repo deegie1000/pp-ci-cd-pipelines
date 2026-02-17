@@ -182,6 +182,35 @@ stages:
                     $failedSolutions = @()
                     $skippedSolutions = @()
                     $deployedSolutions = @()
+                    $flowWarnings = @()
+
+                    # -----------------------------------------------------------
+                    # Acquire OAuth token for Dataverse API (used for flow activation)
+                    # -----------------------------------------------------------
+                    $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+                    $tokenBody = @{
+                      grant_type    = "client_credentials"
+                      client_id     = "$(ClientId)"
+                      client_secret = $env:ClientSecret
+                      scope         = "$(EnvironmentUrl)/.default"
+                    }
+
+                    try {
+                      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+                      $apiHeaders = @{
+                        "Authorization"  = "Bearer $($tokenResponse.access_token)"
+                        "OData-MaxVersion" = "4.0"
+                        "OData-Version"    = "4.0"
+                        "Content-Type"     = "application/json"
+                        "Accept"           = "application/json"
+                      }
+                      $hasApiToken = $true
+                      Write-Host "Acquired Dataverse API token for flow activation."
+                    } catch {
+                      $hasApiToken = $false
+                      Write-Host "##vso[task.logissue type=warning]Could not acquire Dataverse API token for flow activation: $_"
+                      Write-Host "Cloud flow activation will be skipped."
+                    }
 
                     foreach ($solution in $solutions) {
                       $name    = $solution.name
@@ -238,6 +267,78 @@ stages:
 
                       Write-Host "  Successfully deployed."
                       $deployedSolutions += $name
+
+                      # ---------------------------------------------------------
+                      # Activate cloud flows if this solution includes them
+                      # ---------------------------------------------------------
+                      $hasCloudFlows = $false
+                      if ($solution.PSObject.Properties["includesCloudFlows"]) {
+                        $hasCloudFlows = [bool]$solution.includesCloudFlows
+                      }
+
+                      if ($hasCloudFlows -and $hasApiToken) {
+                        Write-Host "  Checking cloud flow statuses..."
+                        $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+
+                        try {
+                          # Find solution ID by unique name
+                          $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid"
+                          $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
+                          $solutionId = $solResult.value[0].solutionid
+
+                          # Get workflow component IDs (componenttype 29 = Workflow/Process)
+                          $compQuery = "$envUrl/api/data/v9.2/solutioncomponents?`$filter=_solutionid_value eq $solutionId and componenttype eq 29&`$select=objectid"
+                          $compResult = Invoke-RestMethod -Uri $compQuery -Headers $apiHeaders
+                          $workflowIds = @($compResult.value | ForEach-Object { $_.objectid })
+
+                          if ($workflowIds.Count -eq 0) {
+                            Write-Host "    No workflow components found in solution."
+                          } else {
+                            Write-Host "    Found $($workflowIds.Count) workflow component(s). Checking for inactive cloud flows..."
+                            $activatedCount = 0
+
+                            foreach ($wfId in $workflowIds) {
+                              try {
+                                $wfQuery = "$envUrl/api/data/v9.2/workflows($wfId)?`$select=name,category,statecode"
+                                $wf = Invoke-RestMethod -Uri $wfQuery -Headers $apiHeaders
+
+                                # Only process cloud flows (category 5) that are not activated (statecode != 1)
+                                if ($wf.category -ne 5) { continue }
+                                if ($wf.statecode -eq 1) {
+                                  Write-Host "    Flow '$($wf.name)' is already on."
+                                  continue
+                                }
+
+                                Write-Host "    Flow '$($wf.name)' is off (statecode=$($wf.statecode)). Attempting to activate..."
+                                $activateBody = '{"statecode": 1}'
+                                Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/workflows($wfId)" -Method Patch -Headers $apiHeaders -Body $activateBody
+                                Write-Host "    Flow '$($wf.name)' activated successfully."
+                                $activatedCount++
+                              } catch {
+                                $errorMsg = $_.Exception.Message
+                                $flowDisplayName = if ($wf -and $wf.name) { $wf.name } else { $wfId }
+                                Write-Host "##vso[task.logissue type=warning]Failed to activate flow '$flowDisplayName': $errorMsg"
+                                $flowWarnings += @{
+                                  Solution = $name
+                                  Flow     = $flowDisplayName
+                                  Error    = $errorMsg
+                                }
+                              }
+                            }
+
+                            if ($activatedCount -gt 0) {
+                              Write-Host "    Activated $activatedCount cloud flow(s)."
+                            }
+                          }
+                        } catch {
+                          Write-Host "##vso[task.logissue type=warning]Failed to check/activate cloud flows for '$name': $($_.Exception.Message)"
+                          $flowWarnings += @{
+                            Solution = $name
+                            Flow     = "(all)"
+                            Error    = $_.Exception.Message
+                          }
+                        }
+                      }
                     }
 
                     # -----------------------------------------------------------
@@ -256,6 +357,14 @@ stages:
                       Write-Host "Skipped (already at target version): $($skippedSolutions -join ', ')"
                     }
 
+                    if ($flowWarnings.Count -gt 0) {
+                      Write-Host ""
+                      Write-Host "Cloud flow activation warnings: $($flowWarnings.Count)"
+                      foreach ($fw in $flowWarnings) {
+                        Write-Host "  - [$($fw.Solution)] Flow '$($fw.Flow)': $($fw.Error)"
+                      }
+                    }
+
                     if ($failedSolutions.Count -gt 0) {
                       Write-Host "Failed solutions: $($failedSolutions -join ', ')"
                       Write-Error "One or more solutions failed to deploy"
@@ -264,3 +373,5 @@ stages:
 
                     Write-Host "`nAll solutions deployed successfully to ${{ parameters.stageName }}."
                   displayName: "Deploy solutions"
+                  env:
+                    ClientSecret: $(ClientSecret)
