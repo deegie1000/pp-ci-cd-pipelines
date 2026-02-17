@@ -155,11 +155,34 @@ steps:
     displayName: "Commit and push solution files"
 
   # ===========================================================================
-  # Step 8: Publish managed solution as pipeline artifact
+  # Step 8: Stage artifacts (managed solution + deployment settings)
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $managedZip = "$(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}.zip"
+      $stagingDir = "$(Build.ArtifactStagingDirectory)"
+
+      # Copy managed solution zip
+      Copy-Item -Path $managedZip -Destination "$stagingDir/${{ parameters.solutionName }}.zip"
+      Write-Host "Staged managed solution: ${{ parameters.solutionName }}.zip"
+
+      # Copy deployment settings for Dev (if exists in root)
+      $settingsFile = "$(Build.SourcesDirectory)/deploymentSettings/deploymentSettings_Dev.json"
+      if (Test-Path $settingsFile) {
+        Copy-Item -Path $settingsFile -Destination "$stagingDir/deploymentSettings_Dev.json"
+        Write-Host "Staged deployment settings: deploymentSettings_Dev.json"
+      } else {
+        Write-Host "No deploymentSettings_Dev.json found in root — skipping."
+      }
+    displayName: "Stage artifacts"
+
+  # ===========================================================================
+  # Step 9: Publish managed solution as pipeline artifact
   #         (consumed by the deploy-solution-dev pipeline)
   # ===========================================================================
   - task: PublishPipelineArtifact@1
     displayName: "Publish managed solution artifact"
     inputs:
-      targetPath: $(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}.zip
+      targetPath: $(Build.ArtifactStagingDirectory)
       artifact: ManagedSolution

@@ -131,15 +131,47 @@ steps:
       Write-Host "  Solution zip:     $solutionZip"
       Write-Host "============================================"
 
+      # Check for deployment settings file
+      if ("$(Build.Reason)" -eq "ResourceTrigger") {
+        $settingsPath = Join-Path (Split-Path $solutionZip) "deploymentSettings_Dev.json"
+      } else {
+        $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/deploymentSettings_Dev.json"
+      }
+
+      if (Test-Path $settingsPath) {
+        Write-Host "Deployment settings found: $settingsPath"
+        Write-Host "##vso[task.setvariable variable=HasDeploymentSettings]true"
+        Write-Host "##vso[task.setvariable variable=DeploymentSettingsPath]$settingsPath"
+      } else {
+        Write-Host "No deployment settings file found — importing without settings."
+        Write-Host "##vso[task.setvariable variable=HasDeploymentSettings]false"
+      }
+
       Write-Host "##vso[task.setvariable variable=SolutionZipPath]$solutionZip"
       Write-Host "##vso[task.setvariable variable=SolutionName]$solutionName"
     displayName: "Resolve solution file path"
 
   # ===========================================================================
-  # Step 5: Import managed solution into Dev environment
+  # Step 5: Import managed solution into Dev (with deployment settings)
+  # ===========================================================================
+  - task: PowerPlatformImportSolution@2
+    displayName: "Import managed solution to Dev (with deployment settings)"
+    condition: eq(variables['HasDeploymentSettings'], 'true')
+    inputs:
+      authenticationType: PowerPlatformSPN
+      PowerPlatformSPN: $(DevServiceConnection)
+      SolutionInputFile: $(SolutionZipPath)
+      UseDeploymentSettingsFile: true
+      DeploymentSettingsFile: $(DeploymentSettingsPath)
+      AsyncOperation: true
+      MaxAsyncWaitTime: 60
+
+  # ===========================================================================
+  # Step 5b: Import managed solution into Dev (without deployment settings)
   # ===========================================================================
   - task: PowerPlatformImportSolution@2
     displayName: "Import managed solution to Dev"
+    condition: ne(variables['HasDeploymentSettings'], 'true')
     inputs:
       authenticationType: PowerPlatformSPN
       PowerPlatformSPN: $(DevServiceConnection)

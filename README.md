@@ -29,7 +29,8 @@ pp-ci-cd-pipelines/
 ├── tests/
 │   ├── Merge-DeploymentSettings.Tests.ps1  # Pester tests for merge logic
 │   ├── Build-Json-Validation.Tests.ps1     # Pester tests for build.json validation
-│   └── Cloud-Flow-Detection.Tests.ps1      # Pester tests for cloud flow detection
+│   ├── Cloud-Flow-Detection.Tests.ps1      # Pester tests for cloud flow detection
+│   └── Deploy-Dev-Settings.Tests.ps1       # Pester tests for Pre-Dev → Dev settings
 ├── solutions/
 │   ├── unpacked/{SolutionName}/         # Unpacked solution source files
 │   ├── unmanaged/{SolutionName}_v.zip   # Versioned unmanaged solution zips
@@ -139,7 +140,7 @@ On-demand pipeline that exports a **single solution** from the **Pre-Dev** envir
 2. Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/{name}/`
 3. Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/{name}.zip`
 4. Commits the results and pushes to the repository
-5. Publishes the managed zip as a pipeline artifact
+5. Publishes the managed zip and `deploymentSettings_Dev.json` (from root `deploymentSettings/`, if it exists) as a pipeline artifact
 6. **Automatically triggers** the Deploy Solution to Dev pipeline
 
 **Trigger:** Manual only (run on demand from the ADO UI).
@@ -155,7 +156,8 @@ Imports a managed solution into the **Dev** environment. Runs automatically afte
 **What it does:**
 
 1. Downloads the managed solution artifact from the triggering export pipeline (or uses the repo for manual runs)
-2. Imports the managed solution into the Dev environment
+2. Checks for `deploymentSettings_Dev.json` &mdash; in the artifact (auto-triggered) or in `deploymentSettings/` (manual runs)
+3. Imports the managed solution into the Dev environment, applying deployment settings if found
 
 **Trigger:** Automatic (on completion of the Pre-Dev export pipeline) or manual.
 
@@ -200,10 +202,10 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │                                 │       │                              │
 │  1. Export unmanaged from       │       │  1. Download managed         │
 │     Pre-Dev environment         │  ───► │     solution artifact        │
-│  2. Clean unpack                │       │  2. Import managed solution  │
-│  3. Pack as managed             │       │     into Dev environment     │
-│  4. Commit to repo              │       │                              │
-│  5. Publish artifact            │       │                              │
+│  2. Clean unpack                │       │  2. Detect deploy settings   │
+│  3. Pack as managed             │       │  3. Import managed solution  │
+│  4. Commit to repo              │       │     with settings if found   │
+│  5. Publish artifact + settings │       │                              │
 └─────────────────────────────────┘       └──────────────────────────────┘
 ```
 
@@ -364,6 +366,7 @@ Invoke-Pester tests/ -Output Detailed
 | `Merge-DeploymentSettings.Tests.ps1` | Merge logic: new items appended, existing items overwritten by export, multiple environment files processed independently, empty arrays preserved |
 | `Build-Json-Validation.Tests.ps1` | `build.json` validation: required fields, `includeDeploymentSettings` defaults to false, only one solution may have it set to true |
 | `Cloud-Flow-Detection.Tests.ps1` | Cloud flow detection: `.json` files in `Workflows/` detected, `.xaml`-only and empty directories return false, `includesCloudFlows` flag round-trip through `build.json` serialization |
+| `Deploy-Dev-Settings.Tests.ps1` | Pre-Dev &rarr; Dev deployment settings: artifact staging includes settings file when present, deploy resolves settings from artifact (auto-triggered) or repo root (manual) |
 
 ---
 
