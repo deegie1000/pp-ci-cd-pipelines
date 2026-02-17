@@ -68,10 +68,11 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - **Detects cloud flows**: checks for `.json` files in the unpacked `Workflows/` directory. If found, sets `includesCloudFlows: true` on the solution entry in `build.json`
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Writes the updated `build.json` (with `includesCloudFlows` flags) and publishes it along with managed zips and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
-5. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
-6. Commits solution files and merged deployment settings, then pushes to the export branch
-7. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
+4. Writes the updated `build.json` (with auto-detected flags like `includesCloudFlows`, `isPatch`) and publishes it along with managed zips and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
+5. **Post-export version management** &mdash; if `postExportVersion` is set in `build.json`, bumps all solution versions in the Dev environment. Non-patch solutions get a direct version update; patch solutions have their display name prefixed (configurable, default `(DO NOT USE) `) and a new patch is cloned from the parent at the new version. See [Post-Export Version Management](#post-export-version-management) for details.
+6. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
+7. Commits solution files and merged deployment settings, then pushes to the export branch
+8. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
 
 **Version validation:** The pipeline does **not** modify solution versions in Dev or update `build.json`. The `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
 
@@ -187,8 +188,9 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │  4. Validate versions    │───►│  │         │  │         │  │            │ │
 │  5. Unpack + pack managed│    │  └─────────┘  └─────────┘  └────────────┘ │
 │  6. Publish artifact     │    │                                             │
-│  7. Merge deploy settings│    │  Each stage:                                │
-│  8. PR to main           │    │  - Validates all artifacts upfront           │
+│  7. Post-export versions │    │  Each stage:                                │
+│  8. Merge deploy settings│    │  - Validates all artifacts upfront           │
+│  9. PR to main           │                                                │
 │                          │    │  - Checks installed versions                │
 └──────────────────────────┘    │  - Skips if already at target version       │
                                 │  - Imports managed + force-overwrite        │
@@ -221,6 +223,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 
 ```json
 {
+  "postExportVersion": "2.0.0.0",
   "solutions": [
     { "name": "CoreComponents", "version": "1.2.0.0" },
     { "name": "CustomConnectors", "version": "1.0.3.0" },
@@ -231,11 +234,15 @@ The `build.json` file defines which solutions to export and their **expected ver
 
 | Field | Description |
 |---|---|
+| `postExportVersion` | Optional root-level string. If set, the export pipeline bumps all solutions in Dev to this version after export. Non-patch solutions get a direct version update; patch solutions are cloned from the parent at this version (see [Post-Export Version Management](#post-export-version-management)). |
 | `solutions` | Ordered array of solutions to export. Order matters &mdash; the release pipeline deploys in this order (put dependencies first). |
 | `solutions[].name` | The solution's **unique name** as it appears in Power Platform (not the display name). |
 | `solutions[].version` | The **exact version** expected in the Dev environment. Must match the version in Dev's `Solution.xml`, or the export pipeline will fail. |
 | `solutions[].includeDeploymentSettings` | Optional boolean (default: `false`). If `true`, the release pipeline will apply a deployment settings file (`deploymentSettings_{stage}.json`) when importing this solution. Only one solution should have this set to `true`. |
 | `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
+| `solutions[].isPatch` | **Auto-detected** boolean. Set to `true` if the unpacked `Solution.xml` contains a `<ParentSolution>` element. Do not set this manually. |
+| `solutions[].parentSolution` | **Auto-detected** string. The unique name of the parent solution (only set when `isPatch` is `true`). |
+| `solutions[].displayName` | **Auto-detected** string. The solution's localized display name (only set when `isPatch` is `true`). |
 
 **How versions work:**
 
@@ -346,6 +353,48 @@ After the merge, the root file becomes:
 - Only **one** solution in `build.json` should have `includeDeploymentSettings: true`
 - If `includeDeploymentSettings` is omitted or `false`, no deployment settings are applied for that solution
 - If `includeDeploymentSettings` is `true` but the corresponding `deploymentSettings_{stage}.json` file is missing from the artifact, the deployment **fails** with an error
+
+### Post-Export Version Management
+
+If `build.json` includes a root-level `postExportVersion` property, the export pipeline automatically bumps solution versions in the Dev environment **after** exporting and publishing artifacts. This prepares Dev for the next development cycle.
+
+**How it works:**
+
+| Solution Type | Action |
+|---|---|
+| **Non-patch** | Calls `pac solution online-version` to set the solution's version to `postExportVersion` directly |
+| **Patch** | 1. Renames the current patch's display name to add a prefix (e.g., `(DO NOT USE) My Patch`). 2. Calls the Dataverse `CloneAsPatch` action to create a new patch from the parent solution at `postExportVersion`. The new patch inherits the original display name. |
+
+**Patch detection:** The pipeline reads each solution's `Other/Solution.xml` after unpacking. If a `<ParentSolution>` element exists, the solution is identified as a patch. The parent solution's unique name and the patch's display name are stored on the `build.json` solution entry.
+
+**Configuring the patch prefix:**
+
+The `PatchDisplayNamePrefix` variable controls the text prepended to old patch display names. It defaults to `(DO NOT USE) ` and can be overridden in the ADO pipeline variables:
+
+```yaml
+variables:
+  - name: PatchDisplayNamePrefix
+    value: "(DO NOT USE) "      # Change this to customize the prefix
+```
+
+**Example:**
+
+Given `build.json`:
+```json
+{
+  "postExportVersion": "2.0.0.0",
+  "solutions": [
+    { "name": "CoreComponents", "version": "1.5.0.0" },
+    { "name": "CorePatch", "version": "1.5.0.1" }
+  ]
+}
+```
+
+If `CorePatch` is detected as a patch of `CoreComponents`:
+1. `CoreComponents` &rarr; version bumped to `2.0.0.0`
+2. `CorePatch` &rarr; display name changed to `(DO NOT USE) CorePatch`, then a new patch of `CoreComponents` is cloned at `2.0.0.0`
+
+If `postExportVersion` is omitted from `build.json`, this step is skipped entirely.
 
 ---
 
@@ -697,6 +746,9 @@ Common examples:
 | PR created but not auto-completing | Branch policies require human reviewers | Either add an exception for the build service or manually complete the PR |
 | Root `deploymentSettings/` not updated | No `deploymentSettings_*.json` files in the export folder | The merge step only runs when settings files exist in `exports/{date-token}/`. If you need deployment settings, add them to the export folder before the pipeline runs |
 | Export overwrote a value I didn't expect | Export items overwrite matching root items by key | The merge uses `SchemaName` (env variables) and `LogicalName` (connection references) to match. If an export file contains an item with the same key as the root, the export value wins. Review the diff in the PR before merging to `main` |
+| "Failed to set version" after export | `pac solution online-version` failed | Ensure the SPN has permissions to update solutions in Dev. Verify the `postExportVersion` value is a valid version string (e.g., `2.0.0.0`) |
+| "Failed to clone patch" after export | Dataverse `CloneAsPatch` action failed | Common causes: parent solution doesn't exist in Dev, version format is invalid, or SPN lacks permissions. Check the pipeline logs for the detailed API error |
+| "Failed to rename patch" after export | Dataverse API couldn't update the display name | Verify the SPN has write access to the solution entity in Dev. The patch's unique name may also not match what's in `build.json` |
 
 ### Release Solutions
 

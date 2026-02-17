@@ -63,6 +63,11 @@ variables:
   - name: EnvironmentUrl
     value: "https://yourorg.crm.dynamics.com"
 
+  # Prefix applied to patch solution display names after export.
+  # Used to mark old patches as obsolete so developers work on the new version.
+  - name: PatchDisplayNamePrefix
+    value: "(DO NOT USE) "
+
   # Secret variables (configure in pipeline UI or link a variable group):
   #   ClientId     - Service Principal Application (Client) ID
   #   ClientSecret - Service Principal Client Secret (mark as secret)
@@ -263,14 +268,30 @@ steps:
           Copy-Item -Path $existingManagedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
           Write-Host "  Staged existing managed zip for artifact publishing."
 
-          # Check unpacked source for cloud flows (already in repo from prior export)
+          # Check unpacked source for cloud flows and patch status (already in repo from prior export)
           $cachedUnpackDir = Join-Path $unpackedDir $name
+
           $cachedWorkflowsDir = Join-Path $cachedUnpackDir "Workflows"
           if ((Test-Path $cachedWorkflowsDir)) {
             $cachedFlowFiles = Get-ChildItem -Path $cachedWorkflowsDir -Filter "*.json" -File -ErrorAction SilentlyContinue
             if ($cachedFlowFiles -and $cachedFlowFiles.Count -gt 0) {
               Write-Host "  Cloud flows detected (cached): $($cachedFlowFiles.Count) .json file(s)"
               $solution | Add-Member -NotePropertyName "includesCloudFlows" -NotePropertyValue $true -Force
+            }
+          }
+
+          $cachedSolutionXml = Join-Path $cachedUnpackDir "Other/Solution.xml"
+          if (Test-Path $cachedSolutionXml) {
+            [xml]$cachedXml = Get-Content $cachedSolutionXml
+            $parentNode = $cachedXml.ImportExportXml.SolutionManifest.ParentSolution
+            if ($parentNode -and $parentNode.UniqueName) {
+              $localizedNames = $cachedXml.ImportExportXml.SolutionManifest.LocalizedNames.LocalizedName
+              $displayName = ($localizedNames | Where-Object { $_.languagecode -eq "1033" }).description
+              if (-not $displayName) { $displayName = $name }
+              Write-Host "  Patch solution (cached). Parent: $($parentNode.UniqueName)"
+              $solution | Add-Member -NotePropertyName "isPatch" -NotePropertyValue $true -Force
+              $solution | Add-Member -NotePropertyName "parentSolution" -NotePropertyValue $parentNode.UniqueName -Force
+              $solution | Add-Member -NotePropertyName "displayName" -NotePropertyValue $displayName -Force
             }
           }
 
@@ -362,6 +383,23 @@ steps:
         }
         Write-Host "  Version check passed."
 
+        # -----------------------------------------------------------------
+        # Detect if solution is a patch (has ParentSolution element)
+        # -----------------------------------------------------------------
+        $parentNode = $solutionXml.ImportExportXml.SolutionManifest.ParentSolution
+        if ($parentNode -and $parentNode.UniqueName) {
+          $parentName = $parentNode.UniqueName
+          $localizedNames = $solutionXml.ImportExportXml.SolutionManifest.LocalizedNames.LocalizedName
+          $displayName = ($localizedNames | Where-Object { $_.languagecode -eq "1033" }).description
+          if (-not $displayName) { $displayName = $name }
+          Write-Host "  Patch solution detected."
+          Write-Host "    Parent solution: $parentName"
+          Write-Host "    Display name:    $displayName"
+          $solution | Add-Member -NotePropertyName "isPatch" -NotePropertyValue $true -Force
+          $solution | Add-Member -NotePropertyName "parentSolution" -NotePropertyValue $parentName -Force
+          $solution | Add-Member -NotePropertyName "displayName" -NotePropertyValue $displayName -Force
+        }
+
         # Rename unmanaged zip to include version
         $versionedUnmanagedZip = Join-Path $unmanagedDir "${name}_${version}.zip"
         Move-Item -Path $unmanagedZip -Destination $versionedUnmanagedZip -Force
@@ -398,9 +436,15 @@ steps:
       # Write updated build.json (with includesCloudFlows flags) and stage
       # -----------------------------------------------------------------
       $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
-      $updatedConfig = @{ solutions = @($solutions) } | ConvertTo-Json -Depth 10
-      Set-Content -Path $buildJsonPath -Value $updatedConfig -Encoding UTF8
-      Write-Host "Updated build.json with cloud flow detection results."
+      $updatedConfig = @{ solutions = @($solutions) }
+
+      # Preserve postExportVersion if it exists in the original config
+      if ($buildConfig.PSObject.Properties["postExportVersion"] -and $buildConfig.postExportVersion) {
+        $updatedConfig["postExportVersion"] = $buildConfig.postExportVersion
+      }
+
+      $updatedConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
+      Write-Host "Updated build.json with detection results."
 
       Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
       Write-Host "Staged build.json for artifact publishing."
@@ -456,7 +500,153 @@ steps:
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 9: Merge export deployment settings into root deploymentSettings/
+  # Step 9: Post-export version management (bump versions in Dev)
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $sourceDir = "$(Build.SourcesDirectory)"
+      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
+      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+
+      # Check for postExportVersion
+      if (-not $buildConfig.PSObject.Properties["postExportVersion"] -or -not $buildConfig.postExportVersion) {
+        Write-Host "No postExportVersion in build.json. Skipping version management."
+        exit 0
+      }
+
+      $postVersion = $buildConfig.postExportVersion
+      $solutions = @($buildConfig.solutions)
+      $prefix = "$(PatchDisplayNamePrefix)"
+
+      Write-Host "============================================"
+      Write-Host "  Post-Export Version Management"
+      Write-Host "============================================"
+      Write-Host "Target version:   $postVersion"
+      Write-Host "Patch prefix:     '$prefix'"
+      Write-Host "Solutions:        $($solutions.Count)"
+      Write-Host ""
+
+      # ---------------------------------------------------------------
+      # Acquire OAuth token for Dataverse API (needed for patch ops)
+      # ---------------------------------------------------------------
+      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
+      }
+
+      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+      $apiHeaders = @{
+        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+        "OData-MaxVersion" = "4.0"
+        "OData-Version"    = "4.0"
+        "Content-Type"     = "application/json"
+        "Accept"           = "application/json"
+      }
+      Write-Host "Authenticated with Dataverse API."
+
+      # ---------------------------------------------------------------
+      # Process each solution
+      # ---------------------------------------------------------------
+      $failedUpdates = @()
+
+      foreach ($solution in $solutions) {
+        $name = $solution.name
+
+        $isPatch = $false
+        if ($solution.PSObject.Properties["isPatch"]) {
+          $isPatch = [bool]$solution.isPatch
+        }
+
+        if ($isPatch) {
+          # =============================================================
+          # Patch solution: rename old patch, then clone new from parent
+          # =============================================================
+          $parentName  = $solution.parentSolution
+          $displayName = $solution.displayName
+
+          Write-Host "--------------------------------------------"
+          Write-Host "Patch: $name (parent: $parentName)"
+          Write-Host "--------------------------------------------"
+
+          # 1. Rename the current patch's display name to add prefix
+          try {
+            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname"
+            $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
+            $solutionId = $solResult.value[0].solutionid
+            $currentDisplayName = $solResult.value[0].friendlyname
+            $newDisplayName = "${prefix}${currentDisplayName}"
+
+            Write-Host "  Renaming: '$currentDisplayName' -> '$newDisplayName'"
+            $renameBody = @{ friendlyname = $newDisplayName } | ConvertTo-Json
+            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/solutions($solutionId)" -Method Patch -Headers $apiHeaders -Body $renameBody
+            Write-Host "  Display name updated."
+          } catch {
+            Write-Error "  Failed to rename patch '$name': $($_.Exception.Message)"
+            $failedUpdates += $name
+            continue
+          }
+
+          # 2. Clone a new patch from the parent solution with the new version
+          try {
+            Write-Host "  Cloning new patch from parent '$parentName' at v$postVersion..."
+            $cloneBody = @{
+              ParentSolutionUniqueName = $parentName
+              DisplayName              = $displayName
+              VersionNumber            = $postVersion
+            } | ConvertTo-Json
+
+            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsPatch" -Method Post -Headers $apiHeaders -Body $cloneBody
+            Write-Host "  New patch cloned successfully at v$postVersion."
+          } catch {
+            Write-Error "  Failed to clone patch from '$parentName': $($_.Exception.Message)"
+            $failedUpdates += $name
+            continue
+          }
+
+        } else {
+          # =============================================================
+          # Non-patch solution: bump version directly
+          # =============================================================
+          Write-Host "--------------------------------------------"
+          Write-Host "Solution: $name -> v$postVersion"
+          Write-Host "--------------------------------------------"
+
+          pac solution online-version `
+            --solution-name $name `
+            --solution-version $postVersion
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "  Failed to set version for '$name'"
+            $failedUpdates += $name
+            continue
+          }
+
+          Write-Host "  Version set to $postVersion."
+        }
+      }
+
+      # ---------------------------------------------------------------
+      # Summary
+      # ---------------------------------------------------------------
+      Write-Host ""
+      if ($failedUpdates.Count -gt 0) {
+        Write-Error "Post-export version update failed for: $($failedUpdates -join ', ')"
+        exit 1
+      }
+
+      Write-Host "Post-export version management complete. All solutions updated to v$postVersion."
+    displayName: "Post-export version management"
+    condition: eq(variables['ExportBranchFound'], 'true')
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 10: Merge export deployment settings into root
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -478,7 +668,7 @@ steps:
     condition: eq(variables['ExportBranchFound'], 'true')
 
   # ===========================================================================
-  # Step 10: Commit and push changes to the export branch
+  # Step 11: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -521,7 +711,7 @@ steps:
     condition: eq(variables['ExportBranchFound'], 'true')
 
   # ===========================================================================
-  # Step 11: Create a Pull Request and auto-complete (merge) into main
+  # Step 12: Create a Pull Request and auto-complete (merge) into main
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
