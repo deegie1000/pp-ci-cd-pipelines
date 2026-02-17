@@ -1,6 +1,8 @@
 {
+  "postExportVersion": "2.0.0.0",
   "solutions": [
-    { "name": "MySolution", "version": "1.0.0.0", "includeDeploymentSettings": true },
-    { "name": "MyOtherSolution", "version": "1.0.0.0" }
+    { "name": "CoreComponents", "version": "1.2.0.0" },
+    { "name": "CustomConnectors", "version": "1.0.3.0" },
+    { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
   ]
 }
