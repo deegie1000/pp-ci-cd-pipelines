@@ -1,7 +1,7 @@
 Describe "Deploy-to-Dev deployment settings resolution" {
 
   # -----------------------------------------------------------------------
-  # Helper: mirrors the logic from deploy-solution-dev.yml Step 4
+  # Helper: mirrors the logic from deploy-solution.yml Dev stage
   # that resolves whether a deployment settings file exists.
   # -----------------------------------------------------------------------
   function Resolve-DeploymentSettings {

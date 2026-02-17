@@ -5,7 +5,8 @@
 # environment, unpacks it into source control, and packs it as managed.
 #
 # On successful completion this pipeline automatically triggers the
-# deploy-solution-dev pipeline which imports the managed solution into Dev.
+# deploy-solution pipeline which imports the managed solution into Dev
+# and then promotes it through QA, Stage, and Prod (with approvals).
 #
 # Prerequisites:
 #   1. Power Platform Build Tools extension installed in the ADO org
@@ -179,7 +180,7 @@ steps:
 
   # ===========================================================================
   # Step 9: Publish managed solution as pipeline artifact
-  #         (consumed by the deploy-solution-dev pipeline)
+  #         (consumed by the deploy-solution pipeline)
   # ===========================================================================
   - task: PublishPipelineArtifact@1
     displayName: "Publish managed solution artifact"

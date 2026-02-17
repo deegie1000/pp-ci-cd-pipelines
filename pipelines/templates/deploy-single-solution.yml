@@ -1,0 +1,151 @@
+# =============================================================================
+# Template: Deploy a single Power Platform solution to an environment
+# =============================================================================
+# Reusable template used by deploy-solution.yml for QA, Stage, and Prod stages.
+# Downloads the solution artifact published by the Dev stage and imports it
+# into the target environment, applying deployment settings if available.
+#
+# Required variable group keys: EnvironmentUrl, ClientId, ClientSecret, TenantId
+# =============================================================================
+
+parameters:
+  - name: stageName
+    type: string
+  - name: displayName
+    type: string
+  - name: environmentName
+    type: string
+  - name: variableGroup
+    type: string
+  - name: dependsOn
+    type: string
+    default: ""
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: ${{ parameters.displayName }}
+    ${{ if eq(parameters.dependsOn, '') }}:
+      dependsOn: []
+    ${{ else }}:
+      dependsOn: ${{ parameters.dependsOn }}
+    variables:
+      - group: ${{ parameters.variableGroup }}
+    jobs:
+      - deployment: Deploy
+        displayName: "Deploy solution to ${{ parameters.stageName }}"
+        environment: ${{ parameters.environmentName }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # ===============================================================
+                # Download solution artifact from the Dev stage
+                # ===============================================================
+                - download: current
+                  artifact: DeploySolution
+                  displayName: "Download solution artifact"
+
+                # ===============================================================
+                # Checkout repository for deployment settings
+                # ===============================================================
+                - checkout: self
+
+                # ===============================================================
+                # Install Power Platform Build Tools
+                # ===============================================================
+                - task: PowerPlatformToolInstaller@2
+                  displayName: "Install Power Platform Build Tools"
+
+                # ===============================================================
+                # Authenticate pac CLI with target environment
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "Authenticating with: $(EnvironmentUrl)"
+
+                    pac auth create `
+                      --environment "$(EnvironmentUrl)" `
+                      --applicationId "$(ClientId)" `
+                      --clientSecret "$(ClientSecret)" `
+                      --tenant "$(TenantId)"
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to authenticate with Power Platform"
+                      exit 1
+                    }
+
+                    Write-Host "Successfully authenticated."
+                    pac auth list
+                  displayName: "Authenticate with Power Platform"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Import managed solution
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    # -----------------------------------------------------------
+                    # Resolve solution zip from the artifact
+                    # -----------------------------------------------------------
+                    $artifactDir = "$(Pipeline.Workspace)/DeploySolution"
+                    $zips = Get-ChildItem -Path $artifactDir -Filter "*.zip" -ErrorAction SilentlyContinue
+
+                    if (-not $zips -or $zips.Count -eq 0) {
+                      Write-Error "No solution zip found in artifact directory: $artifactDir"
+                      exit 1
+                    }
+
+                    $solutionZip = $zips[0].FullName
+                    $solutionName = [System.IO.Path]::GetFileNameWithoutExtension($solutionZip)
+
+                    Write-Host ""
+                    Write-Host "============================================"
+                    Write-Host "  Deploying to ${{ parameters.stageName }}: $solutionName"
+                    Write-Host "  Solution zip:     $solutionZip"
+                    Write-Host "============================================"
+
+                    # -----------------------------------------------------------
+                    # Check for deployment settings
+                    # -----------------------------------------------------------
+                    $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/deploymentSettings_${{ parameters.stageName }}.json"
+
+                    $importArgs = @(
+                      "solution", "import",
+                      "--path", $solutionZip,
+                      "--force-overwrite",
+                      "--activate-plugins"
+                    )
+
+                    if (Test-Path $settingsPath) {
+                      Write-Host "Deployment settings found: $settingsPath"
+                      $importArgs += @("--settings-file", $settingsPath)
+                    } else {
+                      Write-Host "No deployment settings file found — importing without settings."
+                    }
+
+                    # -----------------------------------------------------------
+                    # Import
+                    # -----------------------------------------------------------
+                    & pac @importArgs
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to import solution: $solutionName"
+                      exit 1
+                    }
+
+                    Write-Host ""
+                    Write-Host "============================================"
+                    Write-Host "  Deployment Complete"
+                    Write-Host "============================================"
+                    Write-Host "Solution '$solutionName' has been imported"
+                    Write-Host "into the ${{ parameters.stageName }} environment as managed."
+                    Write-Host ""
+                    Write-Host "Verify in the Power Platform Admin Center or"
+                    Write-Host "maker portal that the solution is present and"
+                    Write-Host "functioning as expected."
+                  displayName: "Import managed solution to ${{ parameters.stageName }}"
+                  env:
+                    ClientSecret: $(ClientSecret)

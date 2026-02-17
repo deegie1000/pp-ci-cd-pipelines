@@ -1,0 +1,290 @@
+# =============================================================================
+# Pipeline: Deploy Solution (Dev → QA → Stage → Prod)
+# =============================================================================
+# Automatically triggered when the "Export Solution from Pre-Dev" pipeline
+# completes successfully. Can also be run manually.
+#
+# Multi-stage pipeline that deploys a single managed solution through all
+# environments in sequence. Dev deploys automatically; QA, Stage, and Prod
+# require manual approval — configure approval checks on the corresponding
+# ADO environments:
+#   - "Power Platform QA"    → add approval gate
+#   - "Power Platform Stage" → add approval gate
+#   - "Power Platform Prod"  → add approval gate
+#
+# Auto-triggered: Downloads the managed solution artifact published by the
+#                 export pipeline and imports it through all stages.
+#
+# Manual run:     Requires the solutionName parameter. Imports
+#                 solutions/managed/{solutionName}.zip through all stages.
+#
+# Prerequisites:
+#   1. Power Platform Build Tools extension installed in the ADO org
+#   2. ADO Environments created:
+#      - "Power Platform Dev"     (no approval check)
+#      - "Power Platform QA"      (with approval check)
+#      - "Power Platform Stage"   (with approval check)
+#      - "Power Platform Prod"    (with approval check)
+#   3. Variable groups per environment containing:
+#      - EnvironmentUrl  : Dataverse environment URL
+#      - ClientId        : Service Principal Application (Client) ID
+#      - ClientSecret    : Service Principal Client Secret (mark as secret)
+#      - TenantId        : Azure AD Tenant ID
+#      Groups: PowerPlatform-Dev, PowerPlatform-QA, PowerPlatform-Stage,
+#              PowerPlatform-Prod
+#   4. The export-solution-predev pipeline publishes an artifact named
+#      "ManagedSolution" containing the managed solution zip
+# =============================================================================
+
+trigger: none
+
+# -----------------------------------------------------------------------------
+# Pipeline resource: triggers this pipeline when the export pipeline completes
+# -----------------------------------------------------------------------------
+# IMPORTANT: The 'source' value must match the name of the export pipeline as
+# it appears in Azure DevOps (Pipelines > All Pipelines). If you renamed the
+# pipeline in the ADO UI, update the source value to match.
+# -----------------------------------------------------------------------------
+resources:
+  pipelines:
+    - pipeline: exportSolution
+      source: "Export Solution from Pre-Dev"
+      trigger:
+        branches:
+          include:
+            - main
+
+# -----------------------------------------------------------------------------
+# Parameters: For manual runs only
+# -----------------------------------------------------------------------------
+parameters:
+  - name: solutionName
+    displayName: "Solution name (required for manual runs, ignored for auto-triggered)"
+    type: string
+    default: ""
+
+pool:
+  vmImage: "windows-latest"
+
+stages:
+  # ===========================================================================
+  # Dev — Deploys automatically (no approval required)
+  # ===========================================================================
+  - stage: Dev
+    displayName: "Deploy to Dev"
+    variables:
+      - group: PowerPlatform-Dev
+    jobs:
+      - deployment: Deploy
+        displayName: "Deploy solution to Dev"
+        environment: "Power Platform Dev"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # ===============================================================
+                # Checkout repository (needed for manual runs)
+                # ===============================================================
+                - checkout: self
+
+                # ===============================================================
+                # Download managed solution artifact (auto-triggered runs only)
+                # ===============================================================
+                - download: exportSolution
+                  artifact: ManagedSolution
+                  displayName: "Download managed solution from export pipeline"
+                  condition: eq(variables['Build.Reason'], 'ResourceTrigger')
+
+                # ===============================================================
+                # Install Power Platform Build Tools
+                # ===============================================================
+                - task: PowerPlatformToolInstaller@2
+                  displayName: "Install Power Platform Build Tools"
+
+                # ===============================================================
+                # Authenticate pac CLI with Dev environment
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "Authenticating with: $(EnvironmentUrl)"
+
+                    pac auth create `
+                      --environment "$(EnvironmentUrl)" `
+                      --applicationId "$(ClientId)" `
+                      --clientSecret "$(ClientSecret)" `
+                      --tenant "$(TenantId)"
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to authenticate with Power Platform"
+                      exit 1
+                    }
+
+                    Write-Host "Successfully authenticated."
+                    pac auth list
+                  displayName: "Authenticate with Power Platform"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Resolve the managed solution file path
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
+                      # -----------------------------------------------------------
+                      # Auto-triggered: find the zip in the downloaded artifact
+                      # -----------------------------------------------------------
+                      $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
+                      Write-Host "Looking for managed solution in artifact: $artifactDir"
+
+                      $zips = Get-ChildItem -Path $artifactDir -Filter "*.zip" -ErrorAction SilentlyContinue
+
+                      if (-not $zips -or $zips.Count -eq 0) {
+                        Write-Error "No solution zip found in artifact directory: $artifactDir"
+                        exit 1
+                      }
+
+                      $solutionZip = $zips[0].FullName
+                      $solutionName = [System.IO.Path]::GetFileNameWithoutExtension($solutionZip)
+                      Write-Host "Found solution artifact: $solutionZip"
+
+                    } else {
+                      # -----------------------------------------------------------
+                      # Manual run: use the repo path based on parameter
+                      # -----------------------------------------------------------
+                      $solutionName = "${{ parameters.solutionName }}"
+
+                      if (-not $solutionName) {
+                        Write-Error "The solutionName parameter is required for manual runs."
+                        exit 1
+                      }
+
+                      $solutionZip = "$(Build.SourcesDirectory)/solutions/managed/$solutionName.zip"
+                      Write-Host "Using managed solution from repo: $solutionZip"
+
+                      if (-not (Test-Path $solutionZip)) {
+                        Write-Error "Managed solution not found: $solutionZip. Run the export pipeline first or verify the solution name."
+                        exit 1
+                      }
+                    }
+
+                    Write-Host ""
+                    Write-Host "============================================"
+                    Write-Host "  Deploying to Dev: $solutionName"
+                    Write-Host "  Solution zip:     $solutionZip"
+                    Write-Host "============================================"
+
+                    # Check for deployment settings file
+                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
+                      $settingsPath = Join-Path (Split-Path $solutionZip) "deploymentSettings_Dev.json"
+                    } else {
+                      $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/deploymentSettings_Dev.json"
+                    }
+
+                    if (Test-Path $settingsPath) {
+                      Write-Host "Deployment settings found: $settingsPath"
+                      Write-Host "##vso[task.setvariable variable=HasDeploymentSettings]true"
+                      Write-Host "##vso[task.setvariable variable=DeploymentSettingsPath]$settingsPath"
+                    } else {
+                      Write-Host "No deployment settings file found — importing without settings."
+                      Write-Host "##vso[task.setvariable variable=HasDeploymentSettings]false"
+                    }
+
+                    Write-Host "##vso[task.setvariable variable=SolutionZipPath]$solutionZip"
+                    Write-Host "##vso[task.setvariable variable=SolutionName]$solutionName"
+                  displayName: "Resolve solution file path"
+
+                # ===============================================================
+                # Import managed solution into Dev
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "Importing managed solution: $(SolutionName)"
+
+                    $importArgs = @(
+                      "solution", "import",
+                      "--path", "$(SolutionZipPath)",
+                      "--force-overwrite",
+                      "--activate-plugins"
+                    )
+
+                    if ("$(HasDeploymentSettings)" -eq "true") {
+                      Write-Host "Using deployment settings: $(DeploymentSettingsPath)"
+                      $importArgs += @("--settings-file", "$(DeploymentSettingsPath)")
+                    }
+
+                    & pac @importArgs
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to import solution: $(SolutionName)"
+                      exit 1
+                    }
+
+                    Write-Host ""
+                    Write-Host "============================================"
+                    Write-Host "  Deployment Complete"
+                    Write-Host "============================================"
+                    Write-Host "Solution '$(SolutionName)' has been imported"
+                    Write-Host "into the Dev environment as managed."
+                    Write-Host ""
+                    Write-Host "Verify in the Power Platform Admin Center or"
+                    Write-Host "maker portal that the solution is present and"
+                    Write-Host "functioning as expected."
+                  displayName: "Import managed solution to Dev"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Stage solution artifact for downstream stages
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    $stagingDir = "$(Build.ArtifactStagingDirectory)/DeploySolution"
+                    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+                    Copy-Item -Path "$(SolutionZipPath)" -Destination $stagingDir
+                    Write-Host "Staged solution for downstream stages: $(SolutionZipPath)"
+                  displayName: "Stage solution for downstream stages"
+
+                - task: PublishPipelineArtifact@1
+                  displayName: "Publish solution for downstream stages"
+                  inputs:
+                    targetPath: $(Build.ArtifactStagingDirectory)/DeploySolution
+                    artifact: DeploySolution
+
+  # ===========================================================================
+  # QA — Requires manual approval (configure on the ADO environment)
+  # ===========================================================================
+  - template: templates/deploy-single-solution.yml
+    parameters:
+      stageName: QA
+      displayName: "Deploy to QA"
+      environmentName: "Power Platform QA"
+      variableGroup: "PowerPlatform-QA"
+      dependsOn: Dev
+
+  # ===========================================================================
+  # Stage — Requires manual approval (configure on the ADO environment)
+  # ===========================================================================
+  - template: templates/deploy-single-solution.yml
+    parameters:
+      stageName: Stage
+      displayName: "Deploy to Stage"
+      environmentName: "Power Platform Stage"
+      variableGroup: "PowerPlatform-Stage"
+      dependsOn: QA
+
+  # ===========================================================================
+  # Prod — Requires manual approval (configure on the ADO environment)
+  # ===========================================================================
+  - template: templates/deploy-single-solution.yml
+    parameters:
+      stageName: Prod
+      displayName: "Deploy to Prod"
+      environmentName: "Power Platform Prod"
+      variableGroup: "PowerPlatform-Prod"
+      dependsOn: Stage
