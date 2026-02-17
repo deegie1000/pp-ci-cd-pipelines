@@ -107,6 +107,52 @@ stages:
                     }
 
                     # -----------------------------------------------------------
+                    # Validate all artifacts exist before importing anything
+                    # -----------------------------------------------------------
+                    Write-Host "`nValidating all solution artifacts..."
+                    $missingArtifacts = @()
+
+                    foreach ($solution in $solutions) {
+                      $name    = $solution.name
+                      $version = $solution.version
+                      $zipPath = Join-Path $artifactDir "${name}_${version}.zip"
+
+                      if (-not (Test-Path $zipPath)) {
+                        Write-Host "  MISSING: ${name}_${version}.zip"
+                        $missingArtifacts += "${name}_${version}.zip"
+                      } else {
+                        Write-Host "  OK:      ${name}_${version}.zip"
+                      }
+
+                      # Also validate deployment settings file if required
+                      $includeSettings = $false
+                      if ($solution.PSObject.Properties["includeDeploymentSettings"]) {
+                        $includeSettings = [bool]$solution.includeDeploymentSettings
+                      }
+
+                      if ($includeSettings) {
+                        $settingsFile = Join-Path $artifactDir "deploymentSettings_${{ parameters.stageName }}.json"
+                        if (-not (Test-Path $settingsFile)) {
+                          Write-Host "  MISSING: deploymentSettings_${{ parameters.stageName }}.json (required by $name)"
+                          $missingArtifacts += "deploymentSettings_${{ parameters.stageName }}.json"
+                        } else {
+                          Write-Host "  OK:      deploymentSettings_${{ parameters.stageName }}.json"
+                        }
+                      }
+                    }
+
+                    if ($missingArtifacts.Count -gt 0) {
+                      Write-Host ""
+                      Write-Error "Artifact validation failed — $($missingArtifacts.Count) file(s) missing. No solutions were imported."
+                      foreach ($m in $missingArtifacts) {
+                        Write-Host "  - $m"
+                      }
+                      exit 1
+                    }
+
+                    Write-Host "All artifacts validated successfully."
+
+                    # -----------------------------------------------------------
                     # Query installed solutions from the target environment
                     # -----------------------------------------------------------
                     Write-Host "`nQuerying installed solutions in target environment..."
@@ -147,13 +193,6 @@ stages:
                       Write-Host "  Solution: $name (v$version)"
                       Write-Host "============================================"
 
-                      # Verify managed zip exists in artifact
-                      if (-not (Test-Path $zipPath)) {
-                        Write-Error "Managed zip not found in artifact: $zipPath"
-                        $failedSolutions += $name
-                        continue
-                      }
-
                       # Check if already installed at this version
                       if ($installed.ContainsKey($name)) {
                         $installedVersion = $installed[$name]
@@ -185,14 +224,8 @@ stages:
 
                       if ($includeSettings) {
                         $settingsFile = Join-Path $artifactDir "deploymentSettings_${{ parameters.stageName }}.json"
-                        if (Test-Path $settingsFile) {
-                          Write-Host "  Using deployment settings: deploymentSettings_${{ parameters.stageName }}.json"
-                          $importArgs += @("--settings-file", $settingsFile)
-                        } else {
-                          Write-Error "includeDeploymentSettings is true for '$name' but deploymentSettings_${{ parameters.stageName }}.json was not found in artifact"
-                          $failedSolutions += $name
-                          continue
-                        }
+                        Write-Host "  Using deployment settings: deploymentSettings_${{ parameters.stageName }}.json"
+                        $importArgs += @("--settings-file", $settingsFile)
                       }
 
                       & pac @importArgs
