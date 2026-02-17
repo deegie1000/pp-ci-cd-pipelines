@@ -55,7 +55,7 @@ pp-ci-cd-pipelines/
 
 ### 1. Daily Export Solutions (`pipelines/export-solutions.yml`)
 
-Exports solutions from the Power Platform **Dev** environment on a daily schedule, validates their versions against `build.json`, unpacks them into source control, converts them to managed packages, and creates a PR to merge into `main`.
+Exports solutions from the Power Platform **Dev** environment on a daily schedule, validates their versions against `build.json`, unpacks them into source control, converts them to managed packages, and creates a PR to merge into `main`. Optionally bumps solution versions in Dev after export to prepare for the next development cycle.
 
 **What it does:**
 
@@ -67,19 +67,22 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
    - **Detects cloud flows**: checks for `.json` files in the unpacked `Workflows/` directory. If found, sets `includesCloudFlows: true` on the solution entry in `build.json`
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
+   - **Detects patches**: reads `Other/Solution.xml` for a `<ParentSolution>` element. If found, sets `isPatch: true`, `parentSolution`, and `displayName` on the solution entry in `build.json`
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Writes the updated `build.json` (with auto-detected flags like `includesCloudFlows`, `isPatch`) and publishes it along with managed zips and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
-5. **Post-export version management** &mdash; if `postExportVersion` is set in `build.json`, bumps all solution versions in the Dev environment. Non-patch solutions get a direct version update; patch solutions have their display name prefixed (configurable, default `(DO NOT USE) `) and a new patch is cloned from the parent at the new version. See [Post-Export Version Management](#post-export-version-management) for details.
+4. Writes the updated `build.json` (with auto-detected flags like `includesCloudFlows`, `isPatch`, `parentSolution`, `displayName`) and publishes it along with managed zips and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
+5. **Post-export version management** &mdash; if `postExportVersion` is set in `build.json`, bumps all solution versions in the Dev environment after export. Non-patch solutions get a direct version update via `pac solution online-version`; patch solutions have their display name prefixed (configurable via `PatchDisplayNamePrefix` variable, default `(DO NOT USE) `) and a new patch is cloned from the parent at the new version via the Dataverse `CloneAsPatch` action. See [Post-Export Version Management](#post-export-version-management) for details.
 6. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
 7. Commits solution files and merged deployment settings, then pushes to the export branch
 8. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
 
-**Version validation:** The pipeline does **not** modify solution versions in Dev or update `build.json`. The `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
+**Version validation:** During export, the `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
 
 ```
 Version mismatch for 'MySolution': build.json specifies v1.0.0.0 but dev environment has v1.1.0.0.
 Update build.json to match the dev environment before re-running.
 ```
+
+If `postExportVersion` is set, the pipeline bumps versions in Dev **after** the export and artifact publishing are complete. This does not affect the exported artifacts &mdash; they retain the original versions from `build.json`.
 
 **Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with optional overrides for branch name and date.
 
