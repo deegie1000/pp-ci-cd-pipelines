@@ -21,11 +21,8 @@ pp-ci-cd-pipelines/
 │   ├── deploymentSettings_Stage.json    # Accumulated deployment settings for Stage
 │   └── deploymentSettings_Prod.json     # Accumulated deployment settings for Prod
 ├── exports/
-│   └── {yyyy-MM-dd-token}/
-│       ├── build.json                   # Export configuration per scheduled run
-│       ├── deploymentSettings_QA.json   # Deployment settings for QA (optional)
-│       ├── deploymentSettings_Stage.json # Deployment settings for Stage (optional)
-│       └── deploymentSettings_Prod.json  # Deployment settings for Prod (optional)
+│   └── {yyyy-MM-dd-dv-requestid}/
+│       └── build.json                   # Generated from Dataverse Export Request
 ├── scripts/
 │   ├── Merge-DeploymentSettings.ps1     # Merges export settings into root folder
 │   └── Sync-ConfigData.ps1             # Extracts/upserts configuration data via Dataverse API
@@ -48,8 +45,8 @@ pp-ci-cd-pipelines/
 
 | # | Pipeline | Trigger | Purpose |
 |---|----------|---------|---------|
-| 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET daily) | Export from Dev, validate versions, pack managed, PR to main |
-| 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod |
+| 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET daily) | Query Dataverse for export request, export from Dev, pack managed, PR to main |
+| 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod, update Dataverse status |
 | 3 | [Export from Pre-Dev](#3-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
 | 4 | [Deploy Solution](#4-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution through Dev &rarr; QA &rarr; Stage &rarr; Prod |
 
@@ -59,70 +56,84 @@ pp-ci-cd-pipelines/
 
 ### 1. Daily Export Solutions (`pipelines/export-solutions.yml`)
 
-Exports solutions from the Power Platform **Dev** environment on a daily schedule, validates their versions against `build.json`, unpacks them into source control, converts them to managed packages, and creates a PR to merge into `main`. Optionally bumps solution versions in Dev after export to prepare for the next development cycle.
+Exports solutions from the Power Platform **Dev** environment on a daily schedule using a **Dataverse-driven** approach. Instead of reading from a manually-created Git export branch, the pipeline queries custom Dataverse tables for a queued **Export Request** record, reads the solution list and configuration from related tables, validates versions, unpacks into source control, converts to managed packages, and creates a PR to merge into `main`. Status and pipeline links are written back to the Dataverse record so users can track progress from a model-driven app.
+
+**Dataverse custom tables** (see [Dataverse Custom Tables](#dataverse-custom-tables) for full schema):
+
+| Table | Purpose |
+|---|---|
+| **Export Request** (`cr_exportrequest`) | Defines an export run &mdash; status, post-export version, pipeline URLs, per-stage deploy status |
+| **Export Request Solution** (`cr_exportrequestsolution`) | Child rows listing which solutions to export and their expected versions |
+| **Config Data Definition** (`cr_configdatadefinition`) | Child rows defining configuration data sets to extract (optional) |
 
 **What it does:**
 
-1. Detects a Git branch matching `export/{today's date}-{token}` (e.g., `export/2026-02-15-sprint42`)
-2. Reads `exports/{date-token}/build.json` on that branch for the list of solutions and their expected versions
-3. For each solution:
+1. Queries Dataverse for the next Export Request with status = **Queued** (ordered by creation date)
+2. Updates the request status to **In Progress** and writes the pipeline run URL back to the record
+3. Reads the related Export Request Solution and Config Data Definition records
+4. Generates `build.json` from the Dataverse data (including `exportRequestId` for downstream tracking)
+5. Creates a working branch (`export/{date}-dv-{short-id}`) from `main`
+6. For each solution:
    - Checks if a managed zip already exists for this name + version (cache check &mdash; skips if so)
    - Exports the **unmanaged** solution zip from Power Platform &rarr; `solutions/unmanaged/`
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
    - **Detects cloud flows**: checks for `.json` files in the unpacked `Workflows/` directory. If found, sets `includesCloudFlows: true` on the solution entry in `build.json`
-   - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
+   - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to the Export Request Solution record. If they don't match, the pipeline **fails** with an error
    - **Detects patches**: reads `Other/Solution.xml` for a `<ParentSolution>` element. If found, sets `isPatch: true`, `parentSolution`, and `displayName` on the solution entry in `build.json`
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Writes the updated `build.json` (with auto-detected flags like `includesCloudFlows`, `isPatch`, `parentSolution`, `displayName`) and publishes it along with managed zips, config data files, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
-5. **Extracts configuration data** &mdash; if `configData` is defined in `build.json`, queries each data set from Dev using OData `$select`/`$filter`, writes the results as JSON to `configData/`, and includes them in the artifact. See [Configuration Data](#configuration-data) for details.
-6. **Post-export version management** &mdash; if `postExportVersion` is set in `build.json`, bumps all solution versions in the Dev environment after export. Non-patch solutions get a direct version update via `pac solution online-version`; patch solutions have their display name prefixed (configurable via `PatchDisplayNamePrefix` variable, default `(DO NOT USE) `) and a new patch is cloned from the parent at the new version via the Dataverse `CloneAsPatch` action. See [Post-Export Version Management](#post-export-version-management) for details.
-7. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
-8. Commits solution files, config data, and merged deployment settings, then pushes to the export branch
-9. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
+7. Writes the updated `build.json` (with auto-detected flags) and publishes it along with managed zips, config data files, and `deploymentSettings_*.json` files from the root `deploymentSettings/` folder as pipeline artifacts
+8. **Extracts configuration data** &mdash; if Config Data Definition records exist on the Export Request, queries each data set from Dev using OData, writes the results as JSON to `configData/`, and includes them in the artifact. See [Configuration Data](#configuration-data) for details.
+9. **Post-export version management** &mdash; if `postExportVersion` is set on the Export Request, bumps all solution versions in Dev after export. Non-patch solutions get a direct version update; patch solutions have their display name prefixed and a new patch is cloned from the parent at the new version. See [Post-Export Version Management](#post-export-version-management) for details.
+10. Commits solution files, config data, and generated `build.json`, then pushes to the working branch
+11. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
+12. **Updates the Export Request** in Dataverse &mdash; sets per-solution statuses (Completed/Failed), auto-detected flags (`includesCloudFlows`, `isPatch`), and marks the request as **Completed** or **Failed**
 
-**Version validation:** During export, the `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
+**Version validation:** During export, the Export Request Solution records are the source of truth for expected versions. If a solution's version in the Dev environment doesn't match the expected version, the pipeline fails immediately with a message like:
 
 ```
-Version mismatch for 'MySolution': build.json specifies v1.0.0.0 but dev environment has v1.1.0.0.
-Update build.json to match the dev environment before re-running.
+Version mismatch for 'MySolution': export request specifies v1.0.0.0 but dev environment has v1.1.0.0.
+Update the Export Request Solution record to match.
 ```
 
-If `postExportVersion` is set, the pipeline bumps versions in Dev **after** the export and artifact publishing are complete. This does not affect the exported artifacts &mdash; they retain the original versions from `build.json`.
+If `postExportVersion` is set, the pipeline bumps versions in Dev **after** the export and artifact publishing are complete. This does not affect the exported artifacts &mdash; they retain the original versions.
 
-**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with optional overrides for branch name and date.
+**Failure handling:** If the pipeline fails at any step after the Export Request is picked up, a dedicated failure handler step marks the request as **Failed** with an error details message and timestamp. This ensures users always see the correct status in the model-driven app.
+
+**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with an optional override to process a specific Export Request by ID.
 
 **Parameters (manual runs):**
 
 | Parameter | Description |
 |---|---|
-| `exportBranch` | Override export branch name (skip auto-detect) |
-| `dateOverride` | Override date for branch detection (yyyy-MM-dd) |
+| `exportRequestId` | Override &mdash; process a specific Export Request by GUID (skip queue lookup) |
 
-**Auth:** Uses pac CLI with secret pipeline variables (`ClientId`, `ClientSecret`, `TenantId`).
+**Auth:** Uses pac CLI with secret pipeline variables (`ClientId`, `ClientSecret`, `TenantId`). The same credentials are used for Dataverse API calls to the Export Request tables.
 
-**Artifact published:** `ManagedSolutions` &mdash; contains `build.json`, `{SolutionName}_{version}.zip` files, and any `deploymentSettings_*.json` files present in the export folder.
+**Artifact published:** `ManagedSolutions` &mdash; contains `build.json` (with `exportRequestId`), `{SolutionName}_{version}.zip` files, and `deploymentSettings_*.json` files from the root `deploymentSettings/` folder.
 
 ---
 
 ### 2. Release Solutions (`pipelines/release-solutions.yml`)
 
-Deploys managed solutions through three environments in sequence: **QA &rarr; Stage &rarr; Prod**. Triggers automatically when the daily export pipeline completes on `main`.
+Deploys managed solutions through three environments in sequence: **QA &rarr; Stage &rarr; Prod**. Triggers automatically when the daily export pipeline completes on `main`. When the artifact contains an `exportRequestId`, each stage updates the corresponding deploy status and release pipeline URL on the Dataverse Export Request record.
 
 **What it does (per stage):**
 
 1. Downloads the `ManagedSolutions` artifact from the export pipeline
-2. **Validates all artifacts upfront** &mdash; checks that every `{name}_{version}.zip` (and required `deploymentSettings_{stage}.json`) exists before importing anything. Fails immediately if any are missing
-3. Authenticates with the target environment using credentials from a per-environment variable group
-4. Queries all installed solutions in the target environment using `pac solution list`
-5. For each solution in `build.json` (in order):
+2. **Updates Dataverse** &mdash; reads `exportRequestId` from `build.json`, sets the stage's deploy status to **In Progress**, and writes the release pipeline URL back to the Export Request record (skipped gracefully if no `exportRequestId` present)
+3. **Validates all artifacts upfront** &mdash; checks that every `{name}_{version}.zip` (and required `deploymentSettings_{stage}.json`) exists before importing anything. Fails immediately if any are missing
+4. Authenticates with the target environment using credentials from a per-environment variable group
+5. Queries all installed solutions in the target environment using `pac solution list`
+6. For each solution in `build.json` (in order):
    - **Skip** &mdash; if the solution is already installed at the target version
    - **Fresh install** &mdash; if the solution doesn't exist in the target environment
    - **Upgrade** &mdash; if the solution exists but at a different version
    - Imports as managed with `--force-overwrite --activate-plugins`
    - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
    - If the solution has `includesCloudFlows: true`, checks for inactive cloud flows after import and attempts to activate them. Activation failures are logged as **warnings** but do not fail the deployment
-6. **Upserts configuration data** &mdash; if `configData` is defined in `build.json`, PATCHes each record into the target environment using stable GUIDs. Record-level failures are logged as **warnings** but do not fail the deployment. See [Configuration Data](#configuration-data)
-7. Fails the stage if any solution fails to deploy
+7. **Upserts configuration data** &mdash; if `configData` is defined in `build.json`, PATCHes each record into the target environment using stable GUIDs. Record-level failures are logged as **warnings** but do not fail the deployment. See [Configuration Data](#configuration-data)
+8. **Updates Dataverse** &mdash; sets the stage's deploy status to **Completed** or **Failed** with a timestamp (skipped gracefully if no `exportRequestId`)
+9. Fails the stage if any solution fails to deploy
 
 **Stages:**
 
@@ -212,21 +223,27 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │  Daily Export Solutions   │    │  Release Solutions                          │
 │  (scheduled / manual)    │    │  (auto-triggered on export completion)      │
 │                          │    │                                             │
-│  1. Detect export branch │    │  ┌─────────┐  ┌─────────┐  ┌────────────┐ │
-│  2. Read build.json      │    │  │   QA    │  │  Stage  │  │    Prod    │ │
-│  3. Export from Dev      │    │  │  (auto) │─►│(manual) │─►│  (manual)  │ │
-│  4. Validate versions    │───►│  │         │  │         │  │            │ │
-│  5. Unpack + pack managed│    │  └─────────┘  └─────────┘  └────────────┘ │
-│  6. Publish artifact     │    │                                             │
-│  7. Post-export versions │    │  Each stage:                                │
-│  8. Merge deploy settings│    │  - Validates all artifacts upfront           │
-│  9. PR to main           │                                                │
-│                          │    │  - Checks installed versions                │
-└──────────────────────────┘    │  - Skips if already at target version       │
-                                │  - Imports managed + force-overwrite        │
-                                │  - Applies deployment settings if enabled   │
-                                │  - Activates cloud flows (warn on failure)  │
-                                └─────────────────────────────────────────────┘
+│  1. Query Dataverse for  │    │  ┌─────────┐  ┌─────────┐  ┌────────────┐ │
+│     queued Export Request│    │  │   QA    │  │  Stage  │  │    Prod    │ │
+│  2. Build config from DV │    │  │  (auto) │─►│(manual) │─►│  (manual)  │ │
+│  3. Export from Dev      │───►│  │         │  │         │  │            │ │
+│  4. Validate versions    │    │  └─────────┘  └─────────┘  └────────────┘ │
+│  5. Unpack + pack managed│    │                                             │
+│  6. Publish artifact     │    │  Each stage:                                │
+│  7. Post-export versions │    │  - Updates Dataverse status (In Progress)   │
+│  8. PR to main           │    │  - Validates all artifacts upfront          │
+│  9. Update DV status     │    │  - Checks installed versions                │
+│                          │    │  - Skips if already at target version       │
+└──────────────────────────┘    │  - Imports managed + force-overwrite        │
+         │                      │  - Applies deployment settings if enabled   │
+         ▼                      │  - Activates cloud flows (warn on failure)  │
+┌──────────────────────────┐    │  - Updates Dataverse status (Completed)     │
+│  Dataverse Export Request│    └─────────────────────────────────────────────┘
+│  ● Export status         │                     │
+│  ● Export pipeline URL   │                     ▼
+│  ● QA/Stage/Prod status  │    ┌─────────────────────────────────────────────┐
+│  ● Release pipeline URL  │◄───│  Dataverse Export Request updated per stage │
+└──────────────────────────┘    └─────────────────────────────────────────────┘
 ```
 
 ### Pre-Dev Promotion (On-Demand: Dev &rarr; QA &rarr; Stage &rarr; Prod)
@@ -252,9 +269,15 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 ```
                               Power Platform CI/CD Pipelines
 
-  ON-DEMAND (single solution)                  SCHEDULED (multi-solution)
-  ───────────────────────────                  ─────────────────────────
+  ON-DEMAND (single solution)                  SCHEDULED (multi-solution, Dataverse-driven)
+  ───────────────────────────                  ────────────────────────────────────────────
 
+                                               ┌─────────────────────────────┐
+                                               │  Dataverse Export Request   │
+                                               │  (model-driven app UI)     │
+                                               └──────────────┬──────────────┘
+                                                              │ queued
+                                                              ▼
   ┌─────────────────────────────┐              ┌─────────────────────────────┐
   │  3. Export from Pre-Dev     │              │  1. Daily Export Solutions   │
   │     (manual trigger)        │              │     (10 PM ET / cron)       │
@@ -272,16 +295,21 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
   │ Dev │─►│ QA  │─►│ Stg │─►│ Prod │        │ QA  │─►│ Stg │─►│ Prod │
   │auto │  │gate │  │gate │  │gate  │        │auto │  │gate │  │gate  │
   └─────┘  └─────┘  └─────┘  └──────┘        └─────┘  └─────┘  └──────┘
+
+                                               Status updates written back
+                                               to Dataverse Export Request
+                                               at each stage boundary
 ```
 
 ---
 
 ## build.json Configuration
 
-The `build.json` file defines which solutions to export and their **expected versions**. It lives on the export branch at `exports/{date-token}/build.json`.
+The `build.json` file defines which solutions to export and their **expected versions**. It is generated automatically by the export pipeline from the Dataverse Export Request records and written to `exports/{date-dv-requestid}/build.json`. It also carries the `exportRequestId` so the release pipeline can link back to the Dataverse record for status updates.
 
 ```json
 {
+  "exportRequestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "postExportVersion": "2.0.0.0",
   "solutions": [
     { "name": "CoreComponents", "version": "1.2.0.0" },
@@ -305,7 +333,8 @@ The `build.json` file defines which solutions to export and their **expected ver
 
 | Field | Description |
 |---|---|
-| `postExportVersion` | Optional root-level string. If set, the export pipeline bumps all solutions in Dev to this version after export. Non-patch solutions get a direct version update; patch solutions are cloned from the parent at this version (see [Post-Export Version Management](#post-export-version-management)). |
+| `exportRequestId` | Auto-generated GUID linking this `build.json` to the Dataverse Export Request record. Used by the release pipeline to write deploy status and pipeline URLs back to Dataverse. Do not set this manually &mdash; it is written by the export pipeline. |
+| `postExportVersion` | Optional root-level string (set on the Export Request record). If set, the export pipeline bumps all solutions in Dev to this version after export. Non-patch solutions get a direct version update; patch solutions are cloned from the parent at this version (see [Post-Export Version Management](#post-export-version-management)). |
 | `solutions` | Ordered array of solutions to export. Order matters &mdash; the release pipeline deploys in this order (put dependencies first). |
 | `solutions[].name` | The solution's **unique name** as it appears in Power Platform (not the display name). |
 | `solutions[].version` | The **exact version** expected in the Dev environment. Must match the version in Dev's `Solution.xml`, or the export pipeline will fail. |
@@ -329,9 +358,9 @@ The `build.json` file defines which solutions to export and their **expected ver
 
 **How versions work:**
 
-- The version in `build.json` must match the version in the Dev environment exactly
+- The version in the Export Request Solution record (which populates `build.json`) must match the version in the Dev environment exactly
 - The export pipeline **reads** the version from Dev after unpack and **compares** it &mdash; it never writes or changes versions
-- If you increment a solution version in Dev, update `build.json` to match before the next export run
+- If you increment a solution version in Dev, update the Export Request Solution record to match before the next export run
 - The release pipeline uses the same version from `build.json` to name artifact files and check target environments
 - Solution zip files are named `{name}_{version}.zip` (e.g., `CoreComponents_1.2.0.0.zip`)
 
@@ -343,73 +372,17 @@ Deployment settings allow you to configure environment-specific values (such as 
 
 **How it works:**
 
-1. Set `"includeDeploymentSettings": true` on **one** solution in `build.json`
-2. Create deployment settings files in the **same folder** as `build.json`, named by environment:
+1. Set `"includeDeploymentSettings": true` on **one** solution in the Export Request (or `build.json`)
+2. Maintain deployment settings files in the root `deploymentSettings/` folder, named by environment:
    - `deploymentSettings_QA.json`
    - `deploymentSettings_Stage.json`
    - `deploymentSettings_Prod.json`
-3. The export pipeline includes these files in the `ManagedSolutions` artifact automatically
+3. The export pipeline copies these files from the root folder into the `ManagedSolutions` artifact automatically (excluding `deploymentSettings_Dev.json`)
 4. During deployment, the release pipeline passes the matching file to `pac solution import --settings-file`
 
 **Root `deploymentSettings/` folder:**
 
-The repository maintains a root `deploymentSettings/` folder that holds the accumulated set of deployment settings across all export runs. During the export pipeline, before the PR is created:
-
-1. The pipeline runs `scripts/Merge-DeploymentSettings.ps1`
-2. For each `deploymentSettings_{env}.json` in the export folder, items are merged into the corresponding root file
-3. **Matching items are overwritten** &mdash; `EnvironmentVariables` are matched by `SchemaName`, `ConnectionReferences` by `LogicalName`
-4. **New items are appended** to the root file
-5. The updated root files are committed to the export branch and included in the PR to `main`
-
-This ensures the root `deploymentSettings/` folder always reflects the latest configuration from every export run.
-
-**Merge example:**
-
-Suppose the root `deploymentSettings/deploymentSettings_QA.json` currently contains:
-
-```json
-{
-  "EnvironmentVariables": [
-    { "SchemaName": "cr5a4_ApiUrl", "Value": "https://old-api.example.com" },
-    { "SchemaName": "cr5a4_FeatureFlag", "Value": "false" }
-  ],
-  "ConnectionReferences": [
-    { "LogicalName": "cr5a4_DataverseConn", "ConnectionId": "aaa-111", "ConnectorId": "/apis/shared_cds" }
-  ]
-}
-```
-
-And an export run includes `exports/2026-02-15-sprint42/deploymentSettings_QA.json` with:
-
-```json
-{
-  "EnvironmentVariables": [
-    { "SchemaName": "cr5a4_ApiUrl", "Value": "https://new-api.example.com" },
-    { "SchemaName": "cr5a4_Timeout", "Value": "30" }
-  ],
-  "ConnectionReferences": []
-}
-```
-
-After the merge, the root file becomes:
-
-```json
-{
-  "EnvironmentVariables": [
-    { "SchemaName": "cr5a4_ApiUrl", "Value": "https://new-api.example.com" },
-    { "SchemaName": "cr5a4_FeatureFlag", "Value": "false" },
-    { "SchemaName": "cr5a4_Timeout", "Value": "30" }
-  ],
-  "ConnectionReferences": [
-    { "LogicalName": "cr5a4_DataverseConn", "ConnectionId": "aaa-111", "ConnectorId": "/apis/shared_cds" }
-  ]
-}
-```
-
-- `cr5a4_ApiUrl` was **overwritten** (matched by `SchemaName`, export value wins)
-- `cr5a4_FeatureFlag` was **preserved** (exists in root but not in export)
-- `cr5a4_Timeout` was **appended** (new item from export)
-- `cr5a4_DataverseConn` was **preserved** (export had an empty `ConnectionReferences` array)
+The repository maintains a root `deploymentSettings/` folder that holds the canonical set of deployment settings for all environments. Update these files directly on `main` when connection references or environment variables change. The export pipeline reads from this folder &mdash; no per-export settings files are needed.
 
 **Example deployment settings file** (`deploymentSettings_QA.json`):
 
@@ -435,7 +408,7 @@ After the merge, the root file becomes:
 
 - Only **one** solution in `build.json` should have `includeDeploymentSettings: true`
 - If `includeDeploymentSettings` is omitted or `false`, no deployment settings are applied for that solution
-- If `includeDeploymentSettings` is `true` but the corresponding `deploymentSettings_{stage}.json` file is missing from the artifact, the deployment **fails** with an error
+- If `includeDeploymentSettings` is `true` but the corresponding `deploymentSettings_{stage}.json` file is missing from the root `deploymentSettings/` folder (and therefore the artifact), the deployment **fails** with an error
 
 ### Post-Export Version Management
 
@@ -537,9 +510,96 @@ Config data upsert runs **after** solution imports because the target tables mus
 - The `entity` value must be the **plural** OData entity set name (e.g., `cr123_states`, not `cr123_state`)
 - The `primaryKey` column must contain a stable GUID that is identical across all environments
 - The `select` columns should not include the primary key &mdash; it is added automatically during extraction
-- Data files are committed to the export branch and included in the PR to `main`
+- Data files are committed to the working branch and included in the PR to `main`
 - Config data is included in the `ManagedSolutions` artifact alongside solution zips and deployment settings
 - The deploy-solution pipeline (pipeline 4) passes config data through the `DeploySolution` artifact chain from Dev to downstream stages
+
+---
+
+## Dataverse Custom Tables
+
+The export pipeline queries three custom Dataverse tables to determine what to export. These tables should be deployed to the **Dev** environment (or a dedicated admin environment) as part of a managed or unmanaged solution.
+
+> **Note:** The table/column names below use the `cr_` publisher prefix as a placeholder. Replace `cr_` with your actual publisher prefix.
+
+### Export Request (`cr_exportrequest`)
+
+| Column | Type | Description |
+|---|---|---|
+| `cr_name` | Text | Auto-generated or user-provided name (e.g., `2026-02-18-001`) |
+| `cr_status` | Choice | `0` = Draft, `1` = Queued, `2` = In Progress, `3` = Completed, `4` = Failed |
+| `cr_postexportversion` | Text | Optional. If set, the pipeline bumps all Dev solution versions to this after export |
+| `cr_pipelinerunurl` | URL | Set by the export pipeline &mdash; link to the ADO export build |
+| `cr_releasepipelineurl` | URL | Set by the release pipeline &mdash; link to the ADO release build |
+| `cr_qadeploystatus` | Choice | `0` = Pending, `2` = In Progress, `3` = Completed, `4` = Failed |
+| `cr_qacompletedon` | DateTime | Set by the release pipeline when QA stage finishes |
+| `cr_stagedeploystatus` | Choice | Same values as QA |
+| `cr_stagecompletedon` | DateTime | Set by the release pipeline when Stage finishes |
+| `cr_proddeploystatus` | Choice | Same values as QA |
+| `cr_prodcompletedon` | DateTime | Set by the release pipeline when Prod finishes |
+| `cr_completedon` | DateTime | Set by the export pipeline when export finishes |
+| `cr_errordetails` | Multiline Text | Set on failure &mdash; pipeline error message |
+
+### Export Request Solution (`cr_exportrequestsolution`)
+
+| Column | Type | Description |
+|---|---|---|
+| `cr_exportrequest` | Lookup | Parent Export Request |
+| `cr_solutionname` | Text | Solution unique name (e.g., `CoreComponents`) |
+| `cr_expectedversion` | Text | Expected version in Dev (e.g., `1.2.0.0`) |
+| `cr_includedeploymentsettings` | Yes/No | If `true`, deployment settings are applied during import |
+| `cr_sortorder` | Whole Number | Optional. Controls export/deploy order (lower = first) |
+| `cr_status` | Choice | `0` = Pending, `2` = Exported, `3` = Failed, `4` = Skipped |
+| `cr_includescloudflows` | Yes/No | Auto-detected by the export pipeline |
+| `cr_ispatch` | Yes/No | Auto-detected by the export pipeline |
+| `cr_parentsolution` | Text | Auto-detected &mdash; parent solution unique name (patches only) |
+| `cr_errordetails` | Multiline Text | Set on failure |
+
+### Config Data Definition (`cr_configdatadefinition`)
+
+| Column | Type | Description |
+|---|---|---|
+| `cr_exportrequest` | Lookup | Parent Export Request |
+| `cr_name` | Text | Friendly name for the data set (e.g., `USStates`) |
+| `cr_entity` | Text | OData plural entity set name (e.g., `cr123_states`) |
+| `cr_primarykey` | Text | Primary key column name (must be stable GUID) |
+| `cr_selectcolumns` | Text | Comma-separated columns to extract |
+| `cr_filter` | Text | Optional OData `$filter` expression |
+| `cr_datafile` | Text | Path to JSON data file (e.g., `configData/USStates.json`) |
+
+### User Experience
+
+Users interact with these tables through a model-driven app. The typical workflow is:
+
+1. **Create** an Export Request (status = Draft)
+2. **Add** solution rows with names, versions, and settings flags
+3. **Add** config data definitions if needed
+4. **Set** the request status to **Queued**
+5. **Wait** for the pipeline to pick it up (next scheduled run or manual trigger)
+6. **Monitor** status changes and click pipeline URLs to see ADO logs
+7. **Track** deployment progress through QA, Stage, and Prod from the same record
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Export Request: 2026-02-18-001                              │
+│  Requested By: Jane Smith         Requested On: Feb 18 3pm  │
+│                                                              │
+│  Export Status:   ● Completed     🔗 View Export Pipeline    │
+│  Release Status:                  🔗 View Release Pipeline   │
+│                                                              │
+│  ┌─────────┬──────────────┬────────────┐                     │
+│  │  QA     │  ● Completed │  Feb 18    │                     │
+│  │  Stage  │  ● Completed │  Feb 19    │                     │
+│  │  Prod   │  ○ Pending   │  —         │                     │
+│  └─────────┴──────────────┴────────────┘                     │
+│                                                              │
+│  Solutions:                                                  │
+│  ┌──────────────────┬─────────┬────────────┬──────────┐      │
+│  │ CoreComponents   │ 1.2.0.0 │ ● Exported │          │      │
+│  │ MainApp          │ 2.1.0.0 │ ● Exported │ Settings │      │
+│  └──────────────────┴─────────┴────────────┴──────────┘      │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -578,6 +638,7 @@ Invoke-Pester tests/ -Output Detailed
 | **Azure DevOps Organization** | Any ADO org with Pipelines enabled |
 | **Power Platform Build Tools** | Install the [Power Platform Build Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.PowerPlatform-BuildTools) extension from the Visual Studio Marketplace into your ADO organization |
 | **App Registration (Service Principal)** | An Entra ID app registration with client secret, granted **System Administrator** or **System Customizer** role in the target Power Platform environments |
+| **Dataverse Custom Tables** | The Export Request, Export Request Solution, and Config Data Definition tables deployed to the Dev environment (see [Dataverse Custom Tables](#dataverse-custom-tables)). The service principal must have read/write access to these tables |
 | **Agent Pool** | Uses `windows-latest` Microsoft-hosted agents (no self-hosted agent required) |
 
 ### Step 1: Install the Power Platform Build Tools Extension
@@ -733,7 +794,7 @@ The **Daily Export Solutions** pipeline (`export-solutions.yml`) requires secret
 
 ### Step 8: Update Pipeline Variables
 
-Edit each pipeline YAML and update the service connection names and environment URLs if they differ from the defaults:
+Edit each pipeline YAML and update the service connection names, environment URLs, and Dataverse table names if they differ from the defaults:
 
 **`pipelines/export-solutions.yml`:**
 ```yaml
@@ -742,7 +803,28 @@ variables:
     value: "PowerPlatformDev"            # <-- your Dev service connection
   - name: EnvironmentUrl
     value: "https://yourorg.crm.dynamics.com"  # <-- your Dev environment URL
+
+  # Dataverse custom table names (update publisher prefix)
+  - name: TableExportRequest
+    value: "cr_exportrequests"           # <-- your plural table name
+  - name: TableExportRequestSolution
+    value: "cr_exportrequestsolutions"   # <-- your plural table name
+  - name: TableConfigDataDefinition
+    value: "cr_configdatadefinitions"    # <-- your plural table name
 ```
+
+**`pipelines/release-solutions.yml`:**
+```yaml
+variables:
+  - name: AdminEnvironmentUrl
+    value: "https://yourorg.crm.dynamics.com"  # <-- Dev env where Export Request tables live
+  - name: AdminClientId
+    value: "$(AdminClientId)"            # <-- set in pipeline UI or variable group
+  - name: AdminTenantId
+    value: "$(AdminTenantId)"            # <-- set in pipeline UI or variable group
+```
+
+Each environment variable group (`PowerPlatform-QA`, etc.) should also include `AdminClientSecret` for the Dev/admin environment, so the release pipeline can update Dataverse status during each stage.
 
 **`pipelines/export-solution-predev.yml`:**
 ```yaml
@@ -775,38 +857,25 @@ The pipeline's build service identity needs permissions to push commits and crea
 ### Daily Export Solutions (Scheduled)
 
 The daily pipeline runs automatically every day at **10:00 PM ET**. No action is needed beyond the initial setup. The pipeline will:
-- Check if an export branch exists for today's date
-- Skip gracefully (with a warning) if no matching branch is found
-- Process all solutions and merge if a branch is found
+- Query Dataverse for an Export Request with status = **Queued**
+- Skip gracefully if no queued request is found
+- Process the request, export solutions, and create a PR to `main`
 
-**To set up an export run**, create a branch and `build.json`:
+**To set up an export run**, create an Export Request in the model-driven app:
 
-```bash
-git checkout main && git pull
-git checkout -b export/2026-02-15-sprint42
-mkdir -p exports/2026-02-15-sprint42
-```
+1. Open the **Export Requests** model-driven app in your Dev environment
+2. Click **+ New** to create a new Export Request
+3. Add **Export Request Solution** rows for each solution to export:
+   - **Solution Name**: The solution's unique name (e.g., `CoreComponents`)
+   - **Expected Version**: The exact version in Dev (e.g., `1.2.0.0`)
+   - **Include Deployment Settings**: Set to **Yes** on one solution if needed
+4. Optionally add **Config Data Definition** rows (see [Configuration Data](#configuration-data))
+5. Optionally set **Post Export Version** (e.g., `2.0.0.0`)
+6. Set the request status to **Queued**
 
-Create `exports/2026-02-15-sprint42/build.json`:
+The next pipeline run (scheduled or manual) will pick up the request and process it. Status and pipeline links will be visible on the record as it progresses.
 
-```json
-{
-  "solutions": [
-    { "name": "CoreComponents", "version": "1.2.0.0" },
-    { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
-  ]
-}
-```
-
-If using deployment settings, create a settings file for each target environment in the same folder (e.g., `exports/2026-02-15-sprint42/deploymentSettings_QA.json`, `deploymentSettings_Stage.json`, `deploymentSettings_Prod.json`). See [Deployment Settings](#deployment-settings) for the file format.
-
-```bash
-git add exports/
-git commit -m "configure export for 2026-02-15-sprint42"
-git push -u origin export/2026-02-15-sprint42
-```
-
-**To run manually:** Go to **Pipelines** > select `export-solutions` > **Run pipeline**. Optionally override the export branch or date.
+**To run manually:** Go to **Pipelines** > select `export-solutions` > **Run pipeline**. Optionally enter an `exportRequestId` to process a specific request.
 
 ### Release Pipeline (Automatic + Manual Approval)
 
@@ -855,9 +924,11 @@ The solution will deploy through all four stages (Dev &rarr; QA &rarr; Stage &ra
 
 | Where | What to Check |
 |---|---|
+| **Dataverse Export Request** | Status updated to **Completed** (or **Failed** with error details) |
+| **Dataverse Export Request** | Pipeline run URL is clickable and links to the ADO build |
+| **Dataverse Export Request Solutions** | Each solution shows **Exported** status with auto-detected flags |
 | **Pipeline logs** | Version validation passed for each solution |
 | **Repository** | `solutions/unpacked/{name}/` has the latest source files |
-| **Repository** | `solutions/unmanaged/{name}_{version}.zip` has the versioned unmanaged export |
 | **Repository** | `solutions/managed/{name}_{version}.zip` has the versioned managed package |
 | **Pull Requests** | A PR was created and auto-completed (or is awaiting policy checks) |
 
@@ -865,6 +936,8 @@ The solution will deploy through all four stages (Dev &rarr; QA &rarr; Stage &ra
 
 | Where | What to Check |
 |---|---|
+| **Dataverse Export Request** | QA/Stage/Prod deploy status updated to **Completed** with timestamps |
+| **Dataverse Export Request** | Release pipeline URL is clickable and links to the ADO release build |
 | **Pipeline logs** | Each solution shows "Successfully deployed" or "Already installed — skipping" |
 | **Pipeline logs** | Cloud flow activation: look for "activated successfully" or warning messages for flows that couldn't be turned on |
 | **Target environment** | Solutions are visible in the Power Platform maker portal at the expected versions |
@@ -909,15 +982,15 @@ Common examples:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Pipeline skips with "No export branch found" | No branch matching `export/{today}-*` exists | Create the export branch and push it before the scheduled run |
-| "build.json not found" | The `exports/{subfolder}/build.json` file is missing on the export branch | Ensure the file path matches the branch name (minus the `export/` prefix) |
-| "Version mismatch for '...'" | The solution version in Dev doesn't match the version in `build.json` | Update `build.json` to match the current version in Dev, or update the version in Dev to match `build.json` |
+| Pipeline skips with "No queued export requests found" | No Export Request with status = Queued exists in Dataverse | Create an Export Request in the model-driven app and set its status to **Queued** before the scheduled run |
+| "Export request has no solutions" | The Export Request has no related Export Request Solution records | Add at least one solution row to the Export Request before queuing |
+| "Version mismatch for '...'" | The solution version in Dev doesn't match the version on the Export Request Solution record | Update the Export Request Solution record to match the current version in Dev, or update the version in Dev to match |
 | "Failed to authenticate with Power Platform" | Secret variables are missing or incorrect | Verify `ClientId`, `ClientSecret`, and `TenantId` in pipeline variables |
 | "Failed to export solution" | Solution name doesn't match, or SPN lacks permissions | Verify the solution unique name in Power Platform and the app user's security role |
 | "Failed to create Pull Request" | Build service lacks repo permissions | Grant Contribute and Create PR permissions (see Step 9) |
 | PR created but not auto-completing | Branch policies require human reviewers | Either add an exception for the build service or manually complete the PR |
-| Root `deploymentSettings/` not updated | No `deploymentSettings_*.json` files in the export folder | The merge step only runs when settings files exist in `exports/{date-token}/`. If you need deployment settings, add them to the export folder before the pipeline runs |
-| Export overwrote a value I didn't expect | Export items overwrite matching root items by key | The merge uses `SchemaName` (env variables) and `LogicalName` (connection references) to match. If an export file contains an item with the same key as the root, the export value wins. Review the diff in the PR before merging to `main` |
+| Export Request still shows "Queued" after pipeline ran | Pipeline failed before picking up the request, or the Dataverse query failed | Check the pipeline logs for authentication errors. Verify the service principal has read/write access to the custom tables |
+| Export Request shows "In Progress" but pipeline finished | The final status update step failed | Check the pipeline logs for the "Update export request status" step. The request may need to be manually updated in Dataverse |
 | "Failed to set version" after export | `pac solution online-version` failed | Ensure the SPN has permissions to update solutions in Dev. Verify the `postExportVersion` value is a valid version string (e.g., `2.0.0.0`) |
 | "Failed to clone patch" after export | Dataverse `CloneAsPatch` action failed | Common causes: parent solution doesn't exist in Dev, version format is invalid, or SPN lacks permissions. Check the pipeline logs for the detailed API error |
 | "Failed to rename patch" after export | Dataverse API couldn't update the display name | Verify the SPN has write access to the solution entity in Dev. The patch's unique name may also not match what's in `build.json` |
@@ -946,7 +1019,8 @@ Common examples:
 | Stage/Prod stuck waiting | No one has approved | Approvers need to go to the pipeline run and click **Approve** on the pending stage |
 | "Managed zip not found in artifact" | Artifact filename doesn't match build.json | Ensure solution names and versions in `build.json` match exactly (filenames are `{name}_{version}.zip`) |
 | Solutions always skipped | Already deployed at target version | This is expected behavior &mdash; the pipeline only deploys when the version changes |
-| "includeDeploymentSettings is true but deploymentSettings_{stage}.json was not found" | Deployment settings file missing from artifact | Ensure the file exists in the same folder as `build.json` on the export branch (e.g., `exports/{date-token}/deploymentSettings_QA.json`) |
+| "includeDeploymentSettings is true but deploymentSettings_{stage}.json was not found" | Deployment settings file missing from artifact | Ensure the file exists in the root `deploymentSettings/` folder (e.g., `deploymentSettings/deploymentSettings_QA.json`) |
+| Dataverse deploy status not updating | Admin credentials not configured or export request has no `exportRequestId` | Verify `AdminClientSecret`, `AdminClientId`, `AdminTenantId`, and `AdminEnvironmentUrl` are set in the release pipeline. Check pipeline logs for "skipping Dataverse status update" messages |
 | "Artifact validation failed" | One or more solution zips or deployment settings files missing from artifact | The pipeline validates all artifacts upfront before importing anything. Ensure all solutions in `build.json` were exported successfully and all required `deploymentSettings_*.json` files exist |
 | "Failed to activate flow" warning | Cloud flow could not be turned on after import | Common causes: connection references not resolved, SPN lacks access to the underlying connections, or flow suspended by DLP policy. Manually activate the flow in the Power Automate portal or resolve the underlying issue |
 | "Could not acquire Dataverse API token" warning | OAuth token request for flow activation failed | Verify `ClientId`, `ClientSecret`, and `TenantId` are correct. Solution imports are not affected &mdash; only flow activation is skipped |
