@@ -4,5 +4,22 @@
     { "name": "CoreComponents", "version": "1.2.0.0" },
     { "name": "CustomConnectors", "version": "1.0.3.0" },
     { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
+  ],
+  "configData": [
+    {
+      "name": "USStates",
+      "entity": "cr123_states",
+      "primaryKey": "cr123_stateid",
+      "select": "cr123_name,cr123_abbreviation,cr123_fipscode",
+      "filter": "statecode eq 0",
+      "dataFile": "configData/USStates.json"
+    },
+    {
+      "name": "CountryCodes",
+      "entity": "cr123_countries",
+      "primaryKey": "cr123_countryid",
+      "select": "cr123_name,cr123_isocode,cr123_callingcode",
+      "dataFile": "configData/CountryCodes.json"
+    }
   ]
 }

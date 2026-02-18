@@ -34,6 +34,7 @@ Before generating anything, ask the user the following questions. Use the AskUse
 6. **Post-export version management** — Auto-bump solution versions in Dev after export
 7. **Cloud flow activation** — Activate cloud flows after deployment (via Dataverse API)
 8. **Patch solution support** — Detect and handle solution patches (CloneAsPatch)
+9. **Configuration data migration** — Extract reference/lookup data from Dev (OData) and upsert into target environments using stable GUIDs
 
 **Naming conventions (offer defaults, let user override):**
 - Service connection prefix: `PowerPlatform` (e.g., `PowerPlatformDev`)
@@ -53,10 +54,11 @@ Create the following directory structure at the repository root:
 {repo-root}/
 ├── pipelines/
 │   └── templates/
+├── configData/                  # Only if config data migration enabled
 ├── deploymentSettings/          # Only if deployment settings feature enabled
 ├── exports/
 │   └── sample/
-├── scripts/                     # Only if deployment settings feature enabled
+├── scripts/                     # If deployment settings or config data enabled
 ├── tests/
 └── solutions/
     ├── unmanaged/
@@ -72,7 +74,7 @@ Generate files in this order (skip any that correspond to disabled features):
 
 ### 3a. Core Configuration
 
-1. **`exports/sample/build.json`** — Sample build.json with the user's environment structure. Include `postExportVersion` only if version management is enabled.
+1. **`exports/sample/build.json`** — Sample build.json with the user's environment structure. Include `postExportVersion` only if version management is enabled. Include `configData` array only if config data migration is enabled.
 
 ### 3b. Pipelines
 
@@ -81,7 +83,8 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
 2. **`pipelines/export-solutions.yml`** (if daily export enabled) — Scheduled export from Dev. Key decisions:
    - Branch detection pattern: `export/{date}-{token}`
    - Auth: secret pipeline variables (`ClientId`, `ClientSecret`, `TenantId`) + service connection for PP tasks
-   - Publishes `ManagedSolutions` artifact (build.json + managed zips + deployment settings files)
+   - Publishes `ManagedSolutions` artifact (build.json + managed zips + deployment settings files + config data files)
+   - Config data extraction (if enabled): runs Sync-ConfigData.ps1 in Extract mode after solution export
    - Post-export version bumping (if enabled): `pac solution online-version` for non-patches, `CloneAsPatch` for patches
    - Deployment settings merge (if enabled): runs Merge-DeploymentSettings.ps1
    - Creates PR to main with auto-complete (squash merge)
@@ -93,6 +96,7 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
    - Validates all artifacts upfront before any imports
    - Skips solutions already at target version
    - Cloud flow activation (if enabled): acquires OAuth token, activates via Dataverse API, warns on failure
+   - Config data upsert (if enabled): runs Sync-ConfigData.ps1 in Upsert mode after solution imports
 
 4. **`pipelines/export-solution-predev.yml`** (if on-demand export enabled) — Single solution export. Key decisions:
    - Manual trigger with `solutionName` parameter
@@ -102,8 +106,9 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
 
 5. **`pipelines/deploy-solution.yml`** (if multi-stage deploy enabled) — Multi-stage single-solution deploy. Key decisions:
    - Triggered by pre-dev export pipeline completion
-   - First stage (Dev): inline, handles auto-trigger + manual, publishes `DeploySolution` artifact
+   - First stage (Dev): inline, handles auto-trigger + manual, publishes `DeploySolution` artifact (including build.json and config data files)
    - Subsequent stages: use `deploy-single-solution.yml` template, download from Dev stage
+   - Config data upsert (if enabled): runs after solution import in each stage
    - Auth: variable groups for all stages
    - Approval gates on environments (per user config)
 
@@ -119,6 +124,13 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
    - EnvironmentVariables matched by `SchemaName` (export overwrites root)
    - ConnectionReferences matched by `LogicalName` (export overwrites root)
    - New items appended; existing items not in export preserved
+
+9. **`scripts/Sync-ConfigData.ps1`** (if config data migration enabled) — Extract and upsert configuration data. Two modes:
+   - `-Mode Extract`: Queries OData from Dev, writes JSON data files to `configData/`
+   - `-Mode Upsert`: Reads JSON data files and PATCHes each record by stable GUID into target environment
+   - Handles OData pagination (`@odata.nextLink`)
+   - Cleans OData metadata from extracted records
+   - Extract failures fail the pipeline; upsert record failures are warnings
 
 ### 3e. Deployment Settings
 
@@ -137,6 +149,7 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
     - `tests/Merge-DeploymentSettings.Tests.ps1` (if deployment settings enabled) — Tests merge algorithm
     - `tests/Cloud-Flow-Detection.Tests.ps1` (if cloud flows enabled) — Tests flow detection logic
     - `tests/Deploy-Dev-Settings.Tests.ps1` (if both deploy + deployment settings enabled) — Tests settings resolution
+    - `tests/Config-Data-Validation.Tests.ps1` (if config data migration enabled) — Tests configData schema validation and data file serialization
 
 ### 3g. Documentation
 
@@ -184,8 +197,10 @@ These are the **hardened design decisions** from production use. Do not deviate 
 
 ### Artifact Flow
 - Daily export publishes `ManagedSolutions` artifact → consumed by release pipeline
+  - Contains: build.json, `{name}_{version}.zip` files, `deploymentSettings_*.json`, `configData/*.json`
 - Pre-dev export publishes `ManagedSolution` artifact → consumed by deploy pipeline Dev stage
 - Deploy pipeline Dev stage re-publishes as `DeploySolution` artifact → consumed by downstream stages
+  - If auto-triggered: includes build.json and configData files from upstream artifact
 - Artifact always contains solution zips named `{name}_{version}.zip` (daily) or `{name}.zip` (pre-dev)
 
 ### Deployment Settings Strategy
@@ -199,10 +214,20 @@ These are the **hardened design decisions** from production use. Do not deviate 
 - Pipeline reads and compares — never writes during export
 - Post-export version bump happens AFTER artifact publishing (doesn't affect exported artifacts)
 
+### Configuration Data Strategy
+- Defined in `build.json` under `configData` array (alongside `solutions`)
+- Extract via OData `$select`/`$filter` (not FetchXML)
+- Upsert via `PATCH /api/data/v9.2/{entity}({guid})` — creates if not exists, updates if exists
+- Requires **stable GUIDs** across all environments (same record = same primary key GUID everywhere)
+- Data files stored in `configData/` directory, committed to repo
+- Runs after solution imports (tables must exist before data can be written)
+- Extract failures fail the pipeline; upsert record-level failures are warnings
+- Uses shared `scripts/Sync-ConfigData.ps1` for both Extract and Upsert modes
+
 ### Error Handling Philosophy
 - **Validate upfront**: Check all artifacts exist before importing anything
 - **Fail fast on critical errors**: Version mismatch, missing artifacts, auth failure
-- **Warn on non-critical**: Cloud flow activation failures logged as warnings, don't fail deployment
+- **Warn on non-critical**: Cloud flow activation failures and config data upsert record failures logged as warnings, don't fail deployment
 - **Accumulate and summarize**: Track deployed/skipped/failed counts, report at end
 
 ### Cloud Flow Activation

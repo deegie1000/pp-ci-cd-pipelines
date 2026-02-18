@@ -14,6 +14,7 @@ This document contains the detailed code patterns, naming conventions, and imple
 | `build.json` | `build.json` | Export/release configuration |
 | `export/{yyyy-MM-dd}-{token}` | `export/2026-02-15-sprint42` | Export branch names |
 | `exports/{yyyy-MM-dd-token}/` | `exports/2026-02-15-sprint42/` | Export configuration folder |
+| `configData/{Name}.json` | `configData/USStates.json` | Extracted configuration data files |
 
 ### ADO Resource Naming
 
@@ -528,6 +529,104 @@ Always use these task versions:
 - `PowerPlatformPackSolution@2`
 - `PowerPlatformImportSolution@2`
 - `PublishPipelineArtifact@1`
+
+## Configuration Data Patterns
+
+### Pattern: Config Data Extract (OData Query)
+
+```powershell
+$selectColumns = "$primaryKey,$select"
+$queryUrl = "$envUrl/api/data/v9.2/$entity`?`$select=$selectColumns"
+
+if ($filter) {
+  $queryUrl += "&`$filter=$filter"
+}
+
+$allRecords = @()
+$nextLink = $queryUrl
+
+# Handle OData pagination
+while ($nextLink) {
+  $response = Invoke-RestMethod -Uri $nextLink -Headers $apiHeaders
+  $allRecords += @($response.value)
+
+  if ($response.PSObject.Properties["@odata.nextLink"]) {
+    $nextLink = $response."@odata.nextLink"
+  } else {
+    $nextLink = $null
+  }
+}
+
+# Clean OData metadata from each record
+$cleanRecords = @()
+foreach ($record in $allRecords) {
+  $clean = @{}
+  foreach ($prop in $record.PSObject.Properties) {
+    if (-not $prop.Name.StartsWith("@odata.") -and -not $prop.Name.StartsWith("_") -and $prop.Name -ne "versionnumber") {
+      $clean[$prop.Name] = $prop.Value
+    }
+  }
+  $cleanRecords += $clean
+}
+
+$cleanRecords | ConvertTo-Json -Depth 10 | Set-Content -Path $dataFilePath -Encoding UTF8
+```
+
+### Pattern: Config Data Upsert (PATCH by GUID)
+
+```powershell
+foreach ($record in $records) {
+  $guid = $record.$primaryKey
+
+  # Build body (all columns except primary key)
+  $body = @{}
+  foreach ($prop in $record.PSObject.Properties) {
+    if ($prop.Name -ne $primaryKey) {
+      $body[$prop.Name] = $prop.Value
+    }
+  }
+
+  $patchUrl = "$envUrl/api/data/v9.2/$entity($guid)"
+  $patchBody = $body | ConvertTo-Json -Depth 5 -Compress
+
+  try {
+    # PATCH without If-Match header = upsert (creates if not exists, updates if exists)
+    Invoke-RestMethod -Uri $patchUrl -Method Patch -Headers $apiHeaders -Body $patchBody | Out-Null
+  } catch {
+    Write-Host "##vso[task.logissue type=warning]Failed to upsert record $guid: $_"
+  }
+}
+```
+
+**Key rules:**
+- `PATCH /api/data/v9.2/{entity}({guid})` without `If-Match` header = upsert
+- Primary key GUID must be stable across all environments
+- Entity name must be the OData plural form (e.g., `cr123_states`)
+- Extract cleans OData metadata (`@odata.*`, `_*_value`, `versionnumber`)
+- Upsert record failures are warnings (don't fail the deployment)
+
+### Pattern: Config Data in Pipeline Steps
+
+```yaml
+# In export pipeline — extract after solution export, before artifact publish
+- pwsh: |
+    $configData = @("$(ConfigDataList)" | ConvertFrom-Json)
+    $syncScript = Join-Path $sourceDir "scripts/Sync-ConfigData.ps1"
+    & $syncScript -Mode Extract -ConfigData $configData -EnvironmentUrl $envUrl -ApiHeaders $apiHeaders -SourceDir $sourceDir
+  displayName: "Extract config data from Dev"
+  env:
+    ClientSecret: $(ClientSecret)
+
+# In deploy pipelines — upsert after solution import
+- pwsh: |
+    $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+    $configData = @($buildConfig.configData)
+    $syncScript = "$(Build.SourcesDirectory)/scripts/Sync-ConfigData.ps1"
+    & $syncScript -Mode Upsert -ConfigData $configData -EnvironmentUrl $envUrl -ApiHeaders $apiHeaders -SourceDir $artifactDir
+  displayName: "Upsert config data"
+  env:
+    ClientSecret: $(ClientSecret)
+```
 
 ## Pool Configuration
 

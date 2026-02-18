@@ -77,6 +77,11 @@ stages:
                     ClientSecret: $(ClientSecret)
 
                 # ===============================================================
+                # Checkout repository (for scripts and deployment settings)
+                # ===============================================================
+                - checkout: self
+
+                # ===============================================================
                 # Deploy solutions in build.json order
                 # ===============================================================
                 - pwsh: |
@@ -373,5 +378,53 @@ stages:
 
                     Write-Host "`nAll solutions deployed successfully to ${{ parameters.stageName }}."
                   displayName: "Deploy solutions"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Upsert configuration data (if configData defined in build.json)
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    $artifactDir = "$(Pipeline.Workspace)/ExportPipeline/ManagedSolutions"
+                    $buildJsonPath = Join-Path $artifactDir "build.json"
+                    $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+
+                    if (-not $buildConfig.PSObject.Properties["configData"] -or $buildConfig.configData.Count -eq 0) {
+                      Write-Host "No configData defined in build.json — skipping."
+                      exit 0
+                    }
+
+                    $configData = @($buildConfig.configData)
+                    $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+
+                    # Acquire OAuth token
+                    $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+                    $tokenBody = @{
+                      grant_type    = "client_credentials"
+                      client_id     = "$(ClientId)"
+                      client_secret = $env:ClientSecret
+                      scope         = "$envUrl/.default"
+                    }
+
+                    $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+                    $apiHeaders = @{
+                      "Authorization"    = "Bearer $($tokenResponse.access_token)"
+                      "OData-MaxVersion" = "4.0"
+                      "OData-Version"    = "4.0"
+                      "Content-Type"     = "application/json"
+                      "Accept"           = "application/json"
+                    }
+
+                    # Resolve data files from the artifact
+                    $syncScript = "$(Build.SourcesDirectory)/scripts/Sync-ConfigData.ps1"
+                    & $syncScript `
+                      -Mode Upsert `
+                      -ConfigData $configData `
+                      -EnvironmentUrl $envUrl `
+                      -ApiHeaders $apiHeaders `
+                      -SourceDir $artifactDir
+                  displayName: "Upsert config data"
                   env:
                     ClientSecret: $(ClientSecret)

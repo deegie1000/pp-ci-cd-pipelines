@@ -73,28 +73,33 @@ steps:
 
   # 7. Write updated build.json (with auto-detected flags)
 
-  # 8. Publish artifact: ManagedSolutions
-  #    Contents: build.json, {name}_{version}.zip files, deploymentSettings_*.json
+  # 8. Extract config data from Dev (if configData defined in build.json)
+  #    - Run scripts/Sync-ConfigData.ps1 -Mode Extract
+  #    - Writes JSON data files to configData/
+  #    - Stages config data files for artifact
+
+  # 9. Publish artifact: ManagedSolutions
+  #    Contents: build.json, {name}_{version}.zip files, deploymentSettings_*.json, configData/*.json
   - task: PublishPipelineArtifact@1
     inputs:
       targetPath: $(Build.ArtifactStagingDirectory)
       artifact: ManagedSolutions
 
-  # 9. Post-export version management (if postExportVersion set)
-  #    - Non-patches: pac solution online-version
-  #    - Patches: rename old + CloneAsPatch
+  # 10. Post-export version management (if postExportVersion set)
+  #     - Non-patches: pac solution online-version
+  #     - Patches: rename old + CloneAsPatch
 
-  # 10. Merge deployment settings (if deploymentSettings_*.json exist)
+  # 11. Merge deployment settings (if deploymentSettings_*.json exist)
   #     - Run scripts/Merge-DeploymentSettings.ps1
 
-  # 11. Commit and push to export branch
+  # 12. Commit and push to export branch (solutions/, configData/, deploymentSettings/)
 
-  # 12. Create PR to main (auto-complete, squash merge)
+  # 13. Create PR to main (auto-complete, squash merge)
 ```
 
 ### Key Generation Rules
 
-- Steps 9-10 are conditional (only generate if features enabled)
+- Steps 8, 10-11 are conditional (only generate if respective features enabled)
 - The export loop (step 6) is a single large PowerShell step
 - Artifact staging copies files to `$(Build.ArtifactStagingDirectory)` before publish
 - PR creation uses `az repos pr create` CLI
@@ -221,13 +226,20 @@ stages:
                   displayName: "Deploy solutions"
                   env:
                     ClientSecret: $(ClientSecret)
+
+                # 10. Upsert config data (if configData defined in build.json)
+                #     - Read build.json from artifact
+                #     - Run scripts/Sync-ConfigData.ps1 -Mode Upsert
+                #     - Resolve data files from artifact directory
 ```
 
 ### Key Generation Rules
 
+- The template needs a `checkout: self` step to access the `scripts/Sync-ConfigData.ps1` script
 - The template download step alias (`ExportPipeline`) must match the pipeline resource alias in the parent pipeline
 - Deployment settings file naming: `deploymentSettings_${{ parameters.stageName }}.json`
 - Cloud flow activation is optional — only generate that section if feature enabled
+- Config data upsert is optional — only generate if config data migration enabled
 - The entire deploy loop is one PowerShell step (for variable sharing)
 
 ---
@@ -387,7 +399,12 @@ stages:
 
                 # 7. Import solution (pac solution import)
 
-                # 8. Stage + publish artifact for downstream stages
+                # 8. Upsert config data (if build.json has configData)
+                #    - Read build.json from artifact (auto-triggered only)
+                #    - Run scripts/Sync-ConfigData.ps1 -Mode Upsert
+
+                # 9. Stage + publish artifact for downstream stages
+                #    Include build.json and configData files if auto-triggered
                 - task: PublishPipelineArtifact@1
                   inputs:
                     targetPath: $(Build.ArtifactStagingDirectory)/DeploySolution
@@ -468,6 +485,10 @@ stages:
                 #    - Check for deploymentSettings_{stageName}.json in repo root
                 #    - Import with --force-overwrite --activate-plugins
                 #    - Apply --settings-file if found
+
+                # 6. Upsert config data (if build.json has configData in artifact)
+                #    - Read build.json from DeploySolution artifact
+                #    - Run scripts/Sync-ConfigData.ps1 -Mode Upsert
 ```
 
 ### Key Generation Rules
@@ -475,6 +496,7 @@ stages:
 - Downloads from `current` pipeline (not external pipeline resource)
 - Artifact name is `DeploySolution` (published by first stage)
 - Deployment settings come from the repo (`deploymentSettings/deploymentSettings_{stage}.json`)
+- Config data files come from the `DeploySolution` artifact (passed through from Dev stage)
 - Simpler than deploy-environment.yml (no build.json, no multi-solution loop, no version check)
 
 ---
@@ -501,14 +523,15 @@ stages:
    - Main flow (export → release) with stage boxes
    - On-demand flow (pre-dev → deploy) with stage boxes
    - Architecture overview (both tracks side-by-side with approval gates)
-7. **build.json Configuration**: Schema example, field reference table, version rules, caching note
+7. **build.json Configuration**: Schema example (with configData if enabled), solutions field reference table, config data field reference table, version rules, caching note
 8. **Deployment Settings** (if enabled): How it works, merge behavior, example, rules
-9. **Post-Export Version Management** (if enabled): How it works, patch handling, example
-10. **Testing**: How to run, test suite table
-11. **ADO Setup**: Step-by-step numbered sections (see SKILL.md Step 3g for full list)
-12. **How to Execute**: Per-workflow step-by-step instructions
-13. **Changing the Schedule** (if daily export): Cron examples table
-14. **Troubleshooting**: Per-pipeline symptom/cause/fix tables
+9. **Configuration Data** (if enabled): How it works, stable GUIDs, data file format, execution order, OData pagination, error handling, rules
+10. **Post-Export Version Management** (if enabled): How it works, patch handling, example
+11. **Testing**: How to run, test suite table
+12. **ADO Setup**: Step-by-step numbered sections (see SKILL.md Step 3g for full list)
+13. **How to Execute**: Per-workflow step-by-step instructions
+14. **Changing the Schedule** (if daily export): Cron examples table
+15. **Troubleshooting**: Per-pipeline symptom/cause/fix tables (include Config Data section if enabled)
 
 ### Diagram Style
 

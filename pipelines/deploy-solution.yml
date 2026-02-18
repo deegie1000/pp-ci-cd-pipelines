@@ -238,6 +238,69 @@ stages:
                     ClientSecret: $(ClientSecret)
 
                 # ===============================================================
+                # Upsert config data (if build.json has configData)
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    # Locate build.json — auto-triggered has it in the artifact,
+                    # manual runs may not have it at all (single solution deploy)
+                    $buildJsonPath = $null
+                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
+                      $candidatePath = "$(Pipeline.Workspace)/exportSolution/ManagedSolution/build.json"
+                      if (Test-Path $candidatePath) {
+                        $buildJsonPath = $candidatePath
+                      }
+                    }
+
+                    if (-not $buildJsonPath) {
+                      # For manual runs, check the repo for an exports/sample/build.json
+                      # (or the user may not have configData — skip gracefully)
+                      Write-Host "No build.json found in artifact — skipping config data upsert."
+                      exit 0
+                    }
+
+                    $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+                    if (-not $buildConfig.PSObject.Properties["configData"] -or $buildConfig.configData.Count -eq 0) {
+                      Write-Host "No configData defined in build.json — skipping."
+                      exit 0
+                    }
+
+                    $configData = @($buildConfig.configData)
+                    $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+
+                    # Acquire OAuth token
+                    $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+                    $tokenBody = @{
+                      grant_type    = "client_credentials"
+                      client_id     = "$(ClientId)"
+                      client_secret = $env:ClientSecret
+                      scope         = "$envUrl/.default"
+                    }
+
+                    $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+                    $apiHeaders = @{
+                      "Authorization"    = "Bearer $($tokenResponse.access_token)"
+                      "OData-MaxVersion" = "4.0"
+                      "OData-Version"    = "4.0"
+                      "Content-Type"     = "application/json"
+                      "Accept"           = "application/json"
+                    }
+
+                    # Resolve data files from the artifact directory
+                    $artifactDir = Split-Path $buildJsonPath -Parent
+                    $syncScript = "$(Build.SourcesDirectory)/scripts/Sync-ConfigData.ps1"
+                    & $syncScript `
+                      -Mode Upsert `
+                      -ConfigData $configData `
+                      -EnvironmentUrl $envUrl `
+                      -ApiHeaders $apiHeaders `
+                      -SourceDir $artifactDir
+                  displayName: "Upsert config data"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
                 # Stage solution artifact for downstream stages
                 # ===============================================================
                 - pwsh: |
@@ -248,6 +311,30 @@ stages:
 
                     Copy-Item -Path "$(SolutionZipPath)" -Destination $stagingDir
                     Write-Host "Staged solution for downstream stages: $(SolutionZipPath)"
+
+                    # Also stage build.json and config data files if available (for downstream config data upsert)
+                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
+                      $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
+                      $buildJsonSrc = Join-Path $artifactDir "build.json"
+                      if (Test-Path $buildJsonSrc) {
+                        Copy-Item -Path $buildJsonSrc -Destination "$stagingDir/build.json"
+                        Write-Host "Staged build.json for downstream stages"
+
+                        # Stage config data files
+                        $buildConfig = Get-Content $buildJsonSrc -Raw | ConvertFrom-Json
+                        if ($buildConfig.PSObject.Properties["configData"]) {
+                          foreach ($ds in $buildConfig.configData) {
+                            $dataFileSrc = Join-Path $artifactDir $ds.dataFile
+                            if (Test-Path $dataFileSrc) {
+                              $destDir = Join-Path $stagingDir (Split-Path $ds.dataFile -Parent)
+                              New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                              Copy-Item -Path $dataFileSrc -Destination (Join-Path $stagingDir $ds.dataFile)
+                              Write-Host "Staged config data: $($ds.dataFile)"
+                            }
+                          }
+                        }
+                      }
+                    }
                   displayName: "Stage solution for downstream stages"
 
                 - task: PublishPipelineArtifact@1

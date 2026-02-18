@@ -14,6 +14,7 @@ pp-ci-cd-pipelines/
 │   └── templates/
 │       ├── deploy-environment.yml        # Reusable deploy template (used by release pipeline)
 │       └── deploy-single-solution.yml    # Reusable deploy template (used by deploy pipeline)
+├── configData/                           # Extracted configuration data (populated by export)
 ├── deploymentSettings/
 │   ├── deploymentSettings_Dev.json      # Accumulated deployment settings for Dev
 │   ├── deploymentSettings_QA.json       # Accumulated deployment settings for QA
@@ -26,12 +27,14 @@ pp-ci-cd-pipelines/
 │       ├── deploymentSettings_Stage.json # Deployment settings for Stage (optional)
 │       └── deploymentSettings_Prod.json  # Deployment settings for Prod (optional)
 ├── scripts/
-│   └── Merge-DeploymentSettings.ps1     # Merges export settings into root folder
+│   ├── Merge-DeploymentSettings.ps1     # Merges export settings into root folder
+│   └── Sync-ConfigData.ps1             # Extracts/upserts configuration data via Dataverse API
 ├── tests/
 │   ├── Merge-DeploymentSettings.Tests.ps1  # Pester tests for merge logic
 │   ├── Build-Json-Validation.Tests.ps1     # Pester tests for build.json validation
 │   ├── Cloud-Flow-Detection.Tests.ps1      # Pester tests for cloud flow detection
-│   └── Deploy-Dev-Settings.Tests.ps1       # Pester tests for Pre-Dev → Dev settings
+│   ├── Deploy-Dev-Settings.Tests.ps1       # Pester tests for Pre-Dev → Dev settings
+│   └── Config-Data-Validation.Tests.ps1   # Pester tests for config data schema + serialization
 ├── solutions/
 │   ├── unpacked/{SolutionName}/         # Unpacked solution source files
 │   ├── unmanaged/{SolutionName}_v.zip   # Versioned unmanaged solution zips
@@ -70,11 +73,12 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - **Detects patches**: reads `Other/Solution.xml` for a `<ParentSolution>` element. If found, sets `isPatch: true`, `parentSolution`, and `displayName` on the solution entry in `build.json`
    - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Writes the updated `build.json` (with auto-detected flags like `includesCloudFlows`, `isPatch`, `parentSolution`, `displayName`) and publishes it along with managed zips and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
-5. **Post-export version management** &mdash; if `postExportVersion` is set in `build.json`, bumps all solution versions in the Dev environment after export. Non-patch solutions get a direct version update via `pac solution online-version`; patch solutions have their display name prefixed (configurable via `PatchDisplayNamePrefix` variable, default `(DO NOT USE) `) and a new patch is cloned from the parent at the new version via the Dataverse `CloneAsPatch` action. See [Post-Export Version Management](#post-export-version-management) for details.
-6. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
-7. Commits solution files and merged deployment settings, then pushes to the export branch
-8. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
+4. Writes the updated `build.json` (with auto-detected flags like `includesCloudFlows`, `isPatch`, `parentSolution`, `displayName`) and publishes it along with managed zips, config data files, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
+5. **Extracts configuration data** &mdash; if `configData` is defined in `build.json`, queries each data set from Dev using OData `$select`/`$filter`, writes the results as JSON to `configData/`, and includes them in the artifact. See [Configuration Data](#configuration-data) for details.
+6. **Post-export version management** &mdash; if `postExportVersion` is set in `build.json`, bumps all solution versions in the Dev environment after export. Non-patch solutions get a direct version update via `pac solution online-version`; patch solutions have their display name prefixed (configurable via `PatchDisplayNamePrefix` variable, default `(DO NOT USE) `) and a new patch is cloned from the parent at the new version via the Dataverse `CloneAsPatch` action. See [Post-Export Version Management](#post-export-version-management) for details.
+7. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
+8. Commits solution files, config data, and merged deployment settings, then pushes to the export branch
+9. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
 
 **Version validation:** During export, the `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
 
@@ -117,7 +121,8 @@ Deploys managed solutions through three environments in sequence: **QA &rarr; St
    - Imports as managed with `--force-overwrite --activate-plugins`
    - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
    - If the solution has `includesCloudFlows: true`, checks for inactive cloud flows after import and attempts to activate them. Activation failures are logged as **warnings** but do not fail the deployment
-6. Fails the stage if any solution fails to deploy
+6. **Upserts configuration data** &mdash; if `configData` is defined in `build.json`, PATCHes each record into the target environment using stable GUIDs. Record-level failures are logged as **warnings** but do not fail the deployment. See [Configuration Data](#configuration-data)
+7. Fails the stage if any solution fails to deploy
 
 **Stages:**
 
@@ -166,6 +171,7 @@ Multi-stage pipeline that deploys a single managed solution through all environm
 2. Authenticates with the target environment using credentials from a per-environment variable group
 3. Checks for `deploymentSettings_{stage}.json` &mdash; in the artifact (Dev, auto-triggered) or in root `deploymentSettings/` folder (Dev manual, and all downstream stages)
 4. Imports the managed solution, applying deployment settings if found
+5. **Upserts configuration data** &mdash; if `build.json` is present in the artifact and contains `configData`, PATCHes each record into the target environment. See [Configuration Data](#configuration-data)
 
 **Stages:**
 
@@ -281,9 +287,21 @@ The `build.json` file defines which solutions to export and their **expected ver
     { "name": "CoreComponents", "version": "1.2.0.0" },
     { "name": "CustomConnectors", "version": "1.0.3.0" },
     { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
+  ],
+  "configData": [
+    {
+      "name": "USStates",
+      "entity": "cr123_states",
+      "primaryKey": "cr123_stateid",
+      "select": "cr123_name,cr123_abbreviation,cr123_fipscode",
+      "filter": "statecode eq 0",
+      "dataFile": "configData/USStates.json"
+    }
   ]
 }
 ```
+
+### Solutions Fields
 
 | Field | Description |
 |---|---|
@@ -296,6 +314,18 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions[].isPatch` | **Auto-detected** boolean. Set to `true` if the unpacked `Solution.xml` contains a `<ParentSolution>` element. Do not set this manually. |
 | `solutions[].parentSolution` | **Auto-detected** string. The unique name of the parent solution (only set when `isPatch` is `true`). |
 | `solutions[].displayName` | **Auto-detected** string. The solution's localized display name (only set when `isPatch` is `true`). |
+
+### Config Data Fields
+
+| Field | Description |
+|---|---|
+| `configData` | Optional array of configuration data sets to extract from Dev and upsert into target environments. See [Configuration Data](#configuration-data). |
+| `configData[].name` | Friendly name for the data set (used in pipeline logs and summaries). |
+| `configData[].entity` | Dataverse table logical name in **plural form** for OData (e.g., `cr123_states`). |
+| `configData[].primaryKey` | Primary key column name. The GUID in this column must be **stable across all environments** &mdash; the same record has the same GUID everywhere. |
+| `configData[].select` | Comma-separated list of columns to extract and upsert (OData `$select`). Do **not** include the primary key here &mdash; it is added automatically. |
+| `configData[].filter` | Optional OData `$filter` expression to scope which rows are extracted (e.g., `statecode eq 0`). Omit to extract all rows. |
+| `configData[].dataFile` | Path to the JSON data file relative to the repository root (e.g., `configData/USStates.json`). Created/updated by the export pipeline. |
 
 **How versions work:**
 
@@ -449,6 +479,68 @@ If `CorePatch` is detected as a patch of `CoreComponents`:
 
 If `postExportVersion` is omitted from `build.json`, this step is skipped entirely.
 
+### Configuration Data
+
+Configuration data allows you to move reference/lookup data (such as US States, Country Codes, or any Dataverse table rows) across environments automatically. Data is extracted from Dev during the export pipeline and upserted into each target environment during deployment.
+
+**How it works:**
+
+1. Define one or more data sets in the `configData` array of `build.json`
+2. During the daily export, the pipeline queries each data set from Dev using OData (`$select` + optional `$filter`)
+3. Results are written as JSON files to `configData/` in the repository and included in the pipeline artifact
+4. During deployment, the pipeline reads each data file and PATCHes every record into the target environment using the record's primary key GUID
+
+**Stable GUIDs:** This approach requires that the primary key GUID for each record is **the same across all environments**. When you create records in Dev, they get assigned GUIDs. Those exact GUIDs are used to create-or-update (upsert) records in QA, Stage, and Prod. The Dataverse Web API `PATCH /api/data/v9.2/{entity}({guid})` creates the record with that GUID if it doesn't exist, or updates it if it does.
+
+**Data file format** (`configData/USStates.json`):
+
+```json
+[
+  {
+    "cr123_stateid": "a1b2c3d4-0000-0000-0000-000000000001",
+    "cr123_name": "Alabama",
+    "cr123_abbreviation": "AL",
+    "cr123_fipscode": "01"
+  },
+  {
+    "cr123_stateid": "a1b2c3d4-0000-0000-0000-000000000002",
+    "cr123_name": "Alaska",
+    "cr123_abbreviation": "AK",
+    "cr123_fipscode": "02"
+  }
+]
+```
+
+**Execution order in deploy pipelines:**
+
+```
+1. Import solutions (creates tables if they don't exist)
+2. Activate cloud flows (if enabled)
+3. Upsert config data (tables must exist before data can be written)
+```
+
+Config data upsert runs **after** solution imports because the target tables must exist in the environment before records can be written.
+
+**OData pagination:** The extract step automatically handles Dataverse OData pagination (`@odata.nextLink`). Data sets with more than 5,000 rows are fetched in batches.
+
+**Error handling:**
+
+| Phase | Behavior |
+|---|---|
+| **Extract** (export pipeline) | Failures **fail the pipeline**. If a data set can't be queried, the export stops. |
+| **Upsert** (deploy pipelines) | Record-level failures are logged as **warnings** but do not fail the deployment. A summary shows how many records succeeded/failed per data set. |
+
+**Script:** Both extract and upsert operations are handled by `scripts/Sync-ConfigData.ps1`, which takes a `-Mode Extract` or `-Mode Upsert` parameter.
+
+**Rules:**
+
+- The `entity` value must be the **plural** OData entity set name (e.g., `cr123_states`, not `cr123_state`)
+- The `primaryKey` column must contain a stable GUID that is identical across all environments
+- The `select` columns should not include the primary key &mdash; it is added automatically during extraction
+- Data files are committed to the export branch and included in the PR to `main`
+- Config data is included in the `ManagedSolutions` artifact alongside solution zips and deployment settings
+- The deploy-solution pipeline (pipeline 4) passes config data through the `DeploySolution` artifact chain from Dev to downstream stages
+
 ---
 
 ## Testing
@@ -473,6 +565,7 @@ Invoke-Pester tests/ -Output Detailed
 | `Build-Json-Validation.Tests.ps1` | `build.json` validation: required fields, `includeDeploymentSettings` defaults to false, only one solution may have it set to true |
 | `Cloud-Flow-Detection.Tests.ps1` | Cloud flow detection: `.json` files in `Workflows/` detected, `.xaml`-only and empty directories return false, `includesCloudFlows` flag round-trip through `build.json` serialization |
 | `Deploy-Dev-Settings.Tests.ps1` | Pre-Dev &rarr; Dev deployment settings: artifact staging includes settings file when present, deploy resolves settings from artifact (auto-triggered) or repo root (manual) |
+| `Config-Data-Validation.Tests.ps1` | Config data validation: required fields (`name`, `entity`, `primaryKey`, `select`, `dataFile`), optional `filter`, multiple data sets, empty/missing `configData` array, data file round-trip serialization |
 
 ---
 
@@ -828,6 +921,17 @@ Common examples:
 | "Failed to set version" after export | `pac solution online-version` failed | Ensure the SPN has permissions to update solutions in Dev. Verify the `postExportVersion` value is a valid version string (e.g., `2.0.0.0`) |
 | "Failed to clone patch" after export | Dataverse `CloneAsPatch` action failed | Common causes: parent solution doesn't exist in Dev, version format is invalid, or SPN lacks permissions. Check the pipeline logs for the detailed API error |
 | "Failed to rename patch" after export | Dataverse API couldn't update the display name | Verify the SPN has write access to the solution entity in Dev. The patch's unique name may also not match what's in `build.json` |
+
+### Config Data (All Pipelines)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "Failed to extract config data" during export | OData query failed | Verify the `entity` name is the correct plural OData entity set name (e.g., `cr123_states`). Check that the SPN has read access to the table in Dev |
+| Config data file is empty (`[]`) | No records match the `filter` expression | Verify the `filter` value in `build.json` returns records. Test the OData query manually: `GET {envUrl}/api/data/v9.2/{entity}?$select=...&$filter=...` |
+| "Failed to upsert record" warnings during deploy | Record PATCH failed | Common causes: table doesn't exist yet (ensure the solution creating the table is imported first), column name mismatch, or SPN lacks write access |
+| Records created with wrong GUIDs | GUIDs are not stable across environments | The primary key GUID in the data file must match the GUID you want in the target environment. Create records in Dev with deterministic GUIDs, or manually set GUIDs in the data file |
+| "Data file not found" warning during deploy | Config data was not extracted or not included in artifact | Ensure the export pipeline ran successfully and the data file path in `build.json` matches the actual file location in the artifact |
+| OData pagination issues | Data set has more than 5,000 rows | The extract script handles `@odata.nextLink` automatically. If timeouts occur, consider narrowing the `filter` to reduce the data set size |
 
 ### Release Solutions
 

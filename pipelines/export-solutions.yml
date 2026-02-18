@@ -485,12 +485,81 @@ steps:
       $solutionsJson = @($solutions) | ConvertTo-Json -Compress
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
 
+      # Pass configData and postExportVersion forward for downstream steps
+      if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData.Count -gt 0) {
+        $configDataJson = @($buildConfig.configData) | ConvertTo-Json -Compress -Depth 10
+        Write-Host "##vso[task.setvariable variable=ConfigDataList]$configDataJson"
+        Write-Host "##vso[task.setvariable variable=HasConfigData]true"
+        Write-Host "Config data sets found: $($buildConfig.configData.Count)"
+      } else {
+        Write-Host "##vso[task.setvariable variable=HasConfigData]false"
+        Write-Host "No configData defined in build.json."
+      }
+
       Write-Host "All solutions processed successfully."
     displayName: "Export, unpack, and pack solutions"
     condition: eq(variables['ExportBranchFound'], 'true')
 
   # ===========================================================================
-  # Step 8: Publish managed solutions and build.json as pipeline artifact
+  # Step 8: Extract configuration data from Dev (if configData defined)
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      if ("$(HasConfigData)" -ne "true") {
+        Write-Host "No configData in build.json — skipping extraction."
+        exit 0
+      }
+
+      $configData = @("$(ConfigDataList)" | ConvertFrom-Json)
+      $sourceDir = "$(Build.SourcesDirectory)"
+      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+
+      # Acquire OAuth token for Dataverse Web API
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
+      }
+
+      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+      $apiHeaders = @{
+        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+        "OData-MaxVersion" = "4.0"
+        "OData-Version"    = "4.0"
+        "Content-Type"     = "application/json"
+        "Accept"           = "application/json"
+      }
+      Write-Host "Authenticated with Dataverse API for config data extraction."
+
+      # Run the Sync-ConfigData script in Extract mode
+      $syncScript = Join-Path $sourceDir "scripts/Sync-ConfigData.ps1"
+      & $syncScript `
+        -Mode Extract `
+        -ConfigData $configData `
+        -EnvironmentUrl $envUrl `
+        -ApiHeaders $apiHeaders `
+        -SourceDir $sourceDir
+
+      # Stage config data files for the artifact
+      foreach ($ds in $configData) {
+        $dataFilePath = Join-Path $sourceDir $ds.dataFile
+        if (Test-Path $dataFilePath) {
+          $destDir = Join-Path "$(Build.ArtifactStagingDirectory)" (Split-Path $ds.dataFile -Parent)
+          New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+          Copy-Item -Path $dataFilePath -Destination (Join-Path "$(Build.ArtifactStagingDirectory)" $ds.dataFile)
+          Write-Host "Staged config data: $($ds.dataFile)"
+        }
+      }
+    displayName: "Extract config data from Dev"
+    condition: eq(variables['ExportBranchFound'], 'true')
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 9: Publish managed solutions and build.json as pipeline artifact
   # ===========================================================================
   - task: PublishPipelineArtifact@1
     displayName: "Publish managed solution artifacts"
@@ -500,7 +569,7 @@ steps:
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 9: Post-export version management (bump versions in Dev)
+  # Step 10: Post-export version management (bump versions in Dev)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -646,7 +715,7 @@ steps:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 10: Merge export deployment settings into root
+  # Step 11: Merge export deployment settings into root
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -668,7 +737,7 @@ steps:
     condition: eq(variables['ExportBranchFound'], 'true')
 
   # ===========================================================================
-  # Step 11: Commit and push changes to the export branch
+  # Step 12: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -676,21 +745,22 @@ steps:
       git config user.email "pipeline@dev.azure.com"
       git config user.name "Azure DevOps Pipeline"
 
-      # Stage solution files, deployment settings, and updated build.json
+      # Stage solution files, deployment settings, config data, and updated build.json
       git add solutions/
       git add deploymentSettings/
+      git add configData/
       git add "exports/$(ExportSubfolder)/build.json"
 
       # Check for changes
-      $status = git status --porcelain solutions/ deploymentSettings/ "exports/$(ExportSubfolder)/build.json"
+      $status = git status --porcelain solutions/ deploymentSettings/ configData/ "exports/$(ExportSubfolder)/build.json"
       if (-not $status) {
-        Write-Host "No changes detected in solutions/, deploymentSettings/, or build.json."
+        Write-Host "No changes detected in solutions/, deploymentSettings/, configData/, or build.json."
         Write-Host "##vso[task.setvariable variable=HasChanges]false"
         exit 0
       }
 
       Write-Host "Changes detected:"
-      git status --short solutions/ deploymentSettings/ "exports/$(ExportSubfolder)/"
+      git status --short solutions/ deploymentSettings/ configData/ "exports/$(ExportSubfolder)/"
 
       Write-Host "##vso[task.setvariable variable=HasChanges]true"
 
@@ -711,7 +781,7 @@ steps:
     condition: eq(variables['ExportBranchFound'], 'true')
 
   # ===========================================================================
-  # Step 12: Create a Pull Request and auto-complete (merge) into main
+  # Step 13: Create a Pull Request and auto-complete (merge) into main
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
