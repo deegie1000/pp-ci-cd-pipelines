@@ -5,6 +5,10 @@
 # Deploys managed solutions in the order defined in build.json, skipping any
 # that are already installed at the target version.
 #
+# When build.json contains an exportRequestId, this template also updates the
+# Export Request record in Dataverse with per-stage deploy status and the
+# release pipeline URL.
+#
 # Required variable group keys: EnvironmentUrl, ClientId, ClientSecret, TenantId
 # =============================================================================
 
@@ -20,6 +24,46 @@ parameters:
   - name: dependsOn
     type: string
     default: ""
+
+  # ---------------------------------------------------------------------------
+  # Dataverse Export Request status tracking (optional)
+  # When provided, the template updates the Export Request record in Dataverse
+  # with deploy status for this stage.
+  # ---------------------------------------------------------------------------
+  - name: adminEnvironmentUrl
+    type: string
+    default: ""
+  - name: adminClientId
+    type: string
+    default: ""
+  - name: adminTenantId
+    type: string
+    default: ""
+  # adminClientSecret is passed via the variable group (AdminClientSecret)
+
+  # Dataverse column names for this stage's status and timestamp
+  - name: dataverseStatusField
+    type: string
+    default: ""
+  - name: dataverseCompletedField
+    type: string
+    default: ""
+
+  # Dataverse table name for export requests
+  - name: dataverseExportRequestTable
+    type: string
+    default: "cr_exportrequests"
+
+  # Status choice values
+  - name: statusInProgress
+    type: string
+    default: "2"
+  - name: statusCompleted
+    type: string
+    default: "3"
+  - name: statusFailed
+    type: string
+    default: "4"
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -80,6 +124,83 @@ stages:
                 # Checkout repository (for scripts and deployment settings)
                 # ===============================================================
                 - checkout: self
+
+                # ===============================================================
+                # Read exportRequestId from build.json and update Dataverse
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    $artifactDir = "$(Pipeline.Workspace)/ExportPipeline/ManagedSolutions"
+                    $buildJsonPath = Join-Path $artifactDir "build.json"
+
+                    if (-not (Test-Path $buildJsonPath)) {
+                      Write-Host "No build.json found — skipping Dataverse status update."
+                      Write-Host "##vso[task.setvariable variable=ExportRequestId]"
+                      exit 0
+                    }
+
+                    $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+
+                    # Check for exportRequestId
+                    if (-not $buildConfig.PSObject.Properties["exportRequestId"] -or -not $buildConfig.exportRequestId) {
+                      Write-Host "No exportRequestId in build.json — Dataverse status tracking disabled."
+                      Write-Host "##vso[task.setvariable variable=ExportRequestId]"
+                      exit 0
+                    }
+
+                    $requestId = $buildConfig.exportRequestId
+                    Write-Host "Export Request ID: $requestId"
+                    Write-Host "##vso[task.setvariable variable=ExportRequestId]$requestId"
+
+                    # Check if Dataverse admin credentials are configured
+                    $adminUrl = "${{ parameters.adminEnvironmentUrl }}"
+                    $statusField = "${{ parameters.dataverseStatusField }}"
+
+                    if (-not $adminUrl -or -not $statusField) {
+                      Write-Host "Dataverse admin credentials or status field not configured — skipping status update."
+                      exit 0
+                    }
+
+                    $adminUrl = $adminUrl.TrimEnd("/")
+
+                    # Acquire OAuth token for Dataverse admin environment
+                    $tokenUrl = "https://login.microsoftonline.com/${{ parameters.adminTenantId }}/oauth2/v2.0/token"
+                    $tokenBody = @{
+                      grant_type    = "client_credentials"
+                      client_id     = "${{ parameters.adminClientId }}"
+                      client_secret = $env:AdminClientSecret
+                      scope         = "$adminUrl/.default"
+                    }
+
+                    $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+                    $apiHeaders = @{
+                      "Authorization"    = "Bearer $($tokenResponse.access_token)"
+                      "OData-MaxVersion" = "4.0"
+                      "OData-Version"    = "4.0"
+                      "Content-Type"     = "application/json"
+                      "Accept"           = "application/json"
+                    }
+
+                    # Update status to In Progress
+                    $pipelineUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+
+                    $updateBody = @{
+                      $statusField = [int]${{ parameters.statusInProgress }}
+                      cr_releasepipelineurl = $pipelineUrl
+                    } | ConvertTo-Json
+
+                    try {
+                      Invoke-RestMethod -Uri "$adminUrl/api/data/v9.2/${{ parameters.dataverseExportRequestTable }}($requestId)" `
+                        -Method Patch -Headers $apiHeaders -Body $updateBody
+                      Write-Host "Updated ${{ parameters.stageName }} deploy status to In Progress."
+                      Write-Host "Set release pipeline URL: $pipelineUrl"
+                    } catch {
+                      Write-Host "##vso[task.logissue type=warning]Failed to update Dataverse status: $($_.Exception.Message)"
+                    }
+                  displayName: "Update Dataverse: ${{ parameters.stageName }} In Progress"
+                  env:
+                    AdminClientSecret: $(AdminClientSecret)
 
                 # ===============================================================
                 # Deploy solutions in build.json order
@@ -428,3 +549,63 @@ stages:
                   displayName: "Upsert config data"
                   env:
                     ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Update Dataverse: Stage deploy status (Completed or Failed)
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Continue"
+
+                    $requestId = "$(ExportRequestId)"
+                    $adminUrl = "${{ parameters.adminEnvironmentUrl }}".TrimEnd("/")
+                    $statusField = "${{ parameters.dataverseStatusField }}"
+                    $completedField = "${{ parameters.dataverseCompletedField }}"
+
+                    if (-not $requestId -or -not $adminUrl -or -not $statusField) {
+                      Write-Host "Dataverse status tracking not configured or no export request — skipping."
+                      exit 0
+                    }
+
+                    # Acquire OAuth token for Dataverse admin environment
+                    $tokenUrl = "https://login.microsoftonline.com/${{ parameters.adminTenantId }}/oauth2/v2.0/token"
+                    $tokenBody = @{
+                      grant_type    = "client_credentials"
+                      client_id     = "${{ parameters.adminClientId }}"
+                      client_secret = $env:AdminClientSecret
+                      scope         = "$adminUrl/.default"
+                    }
+
+                    try {
+                      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+                      $apiHeaders = @{
+                        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+                        "OData-MaxVersion" = "4.0"
+                        "OData-Version"    = "4.0"
+                        "Content-Type"     = "application/json"
+                        "Accept"           = "application/json"
+                      }
+
+                      # Determine status based on job result
+                      $succeeded = "$env:AGENT_JOBSTATUS" -eq "Succeeded"
+                      $statusValue = if ($succeeded) { [int]${{ parameters.statusCompleted }} } else { [int]${{ parameters.statusFailed }} }
+
+                      $updateBody = @{
+                        $statusField = $statusValue
+                      }
+
+                      if ($completedField) {
+                        $updateBody[$completedField] = (Get-Date -Format "o")
+                      }
+
+                      Invoke-RestMethod -Uri "$adminUrl/api/data/v9.2/${{ parameters.dataverseExportRequestTable }}($requestId)" `
+                        -Method Patch -Headers $apiHeaders -Body ($updateBody | ConvertTo-Json)
+
+                      $label = if ($succeeded) { "Completed" } else { "Failed" }
+                      Write-Host "Updated ${{ parameters.stageName }} deploy status to $label."
+                    } catch {
+                      Write-Host "##vso[task.logissue type=warning]Failed to update Dataverse deploy status: $($_.Exception.Message)"
+                    }
+                  displayName: "Update Dataverse: ${{ parameters.stageName }} Final Status"
+                  condition: and(not(canceled()), ne(variables['ExportRequestId'], ''))
+                  env:
+                    AdminClientSecret: $(AdminClientSecret)

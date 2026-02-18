@@ -1,8 +1,13 @@
 # =============================================================================
-# Pipeline: Release Power Platform Solutions (QA → Stage → Prod)
+# Pipeline: Release Power Platform Solutions (QA -> Stage -> Prod)
 # =============================================================================
 # Triggers automatically when the daily export pipeline completes.
 # Deploys managed solutions through three environments in sequence.
+#
+# When the export pipeline was triggered from a Dataverse Export Request,
+# build.json will contain an exportRequestId. Each stage updates the
+# corresponding deploy status fields on the Export Request record so users
+# can track progress from the model-driven app.
 #
 # QA deploys automatically. Stage and Prod require manual approval — configure
 # approval checks on the corresponding ADO environments:
@@ -21,7 +26,10 @@
 #      - ClientSecret    : Service Principal Client Secret (mark as secret)
 #      - TenantId        : Azure AD Tenant ID
 #      Groups: PowerPlatform-QA, PowerPlatform-Stage, PowerPlatform-Prod
-#   4. The export-solutions pipeline publishes an artifact named
+#   4. Each variable group should also include (for Dataverse status updates):
+#      - AdminClientSecret : Client secret for the Dev/admin environment
+#      (or link the PowerPlatform-Admin variable group)
+#   5. The export-solutions pipeline publishes an artifact named
 #      "ManagedSolutions" containing build.json and *_version.zip files
 # =============================================================================
 
@@ -36,6 +44,29 @@ resources:
           include:
             - main
 
+# -----------------------------------------------------------------------------
+# Pipeline-level variables for Dataverse Export Request status tracking.
+# These point to the Dev environment where the Export Request tables live.
+# The service principal must have read/write access to the custom tables.
+# -----------------------------------------------------------------------------
+variables:
+  # URL of the Dataverse environment containing Export Request tables
+  # (typically the Dev environment)
+  - name: AdminEnvironmentUrl
+    value: "https://yourorg.crm.dynamics.com"
+
+  # Service principal credentials for the admin/Dev environment.
+  # If these match the Dev variable group credentials, you can reference
+  # the same values. If different, set them here or in a shared variable group.
+  - name: AdminClientId
+    value: "$(AdminClientId)"    # Set in pipeline UI or variable group
+  - name: AdminTenantId
+    value: "$(AdminTenantId)"    # Set in pipeline UI or variable group
+
+  # AdminClientSecret should be configured as a secret variable in the
+  # pipeline UI, or linked from a variable group. Each environment variable
+  # group should include AdminClientSecret if it's the same across environments.
+
 pool:
   vmImage: "windows-latest"
 
@@ -49,6 +80,12 @@ stages:
       displayName: "Deploy to QA"
       environmentName: "Power Platform QA"
       variableGroup: "PowerPlatform-QA"
+      # Dataverse status tracking
+      adminEnvironmentUrl: $(AdminEnvironmentUrl)
+      adminClientId: $(AdminClientId)
+      adminTenantId: $(AdminTenantId)
+      dataverseStatusField: "cr_qadeploystatus"
+      dataverseCompletedField: "cr_qacompletedon"
 
   # ===========================================================================
   # Stage — Requires manual approval (configure on the ADO environment)
@@ -60,6 +97,12 @@ stages:
       environmentName: "Power Platform Stage"
       variableGroup: "PowerPlatform-Stage"
       dependsOn: QA
+      # Dataverse status tracking
+      adminEnvironmentUrl: $(AdminEnvironmentUrl)
+      adminClientId: $(AdminClientId)
+      adminTenantId: $(AdminTenantId)
+      dataverseStatusField: "cr_stagedeploystatus"
+      dataverseCompletedField: "cr_stagecompletedon"
 
   # ===========================================================================
   # Prod — Requires manual approval (configure on the ADO environment)
@@ -71,3 +114,9 @@ stages:
       environmentName: "Power Platform Prod"
       variableGroup: "PowerPlatform-Prod"
       dependsOn: Stage
+      # Dataverse status tracking
+      adminEnvironmentUrl: $(AdminEnvironmentUrl)
+      adminClientId: $(AdminClientId)
+      adminTenantId: $(AdminTenantId)
+      dataverseStatusField: "cr_proddeploystatus"
+      dataverseCompletedField: "cr_prodcompletedon"

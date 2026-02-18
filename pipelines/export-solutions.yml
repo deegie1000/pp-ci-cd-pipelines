@@ -1,12 +1,19 @@
 # =============================================================================
-# Pipeline: Daily Power Platform Solution Export
+# Pipeline: Daily Power Platform Solution Export (Dataverse-Driven)
 # =============================================================================
-# Runs daily at 10pm ET. Detects export branches for the current date,
-# exports solutions from the dev environment, unpacks them, converts to
-# managed, and creates a PR to main.
+# Runs daily at 10pm ET. Queries Dataverse for a queued Export Request record,
+# reads the solution list and configuration from the related tables, exports
+# solutions from the dev environment, unpacks them, converts to managed, and
+# creates a PR to main.
 #
-# Branch naming convention: export/yyyy-MM-dd-{token}
-# Configuration file:       exports/{yyyy-MM-dd-token}/build.json
+# Instead of reading from an export branch, this pipeline queries custom
+# Dataverse tables to determine what to export. Users create Export Request
+# records via a model-driven app, and this pipeline picks them up.
+#
+# Custom Dataverse tables (see README for schema):
+#   - Export Request          (cr_exportrequest)
+#   - Export Request Solution (cr_exportrequestsolution)
+#   - Config Data Definition  (cr_configdatadefinition)
 #
 # Prerequisites:
 #   1. Power Platform Build Tools extension installed in the ADO org
@@ -18,6 +25,7 @@
 #      (These should match the service principal backing the service connection)
 #   4. Build Service account has "Contribute" and "Create Pull Request"
 #      permissions on the repository
+#   5. Custom Dataverse tables deployed to the dev environment
 # =============================================================================
 
 trigger: none
@@ -39,13 +47,8 @@ schedules:
 # Parameters: Configurable in the ADO UI when running manually
 # -----------------------------------------------------------------------------
 parameters:
-  - name: exportBranch
-    displayName: "Override export branch (leave empty for auto-detect)"
-    type: string
-    default: ""
-
-  - name: dateOverride
-    displayName: "Override date for branch detection (yyyy-MM-dd format, leave empty for today)"
+  - name: exportRequestId
+    displayName: "Override export request ID (leave empty to pick next queued request)"
     type: string
     default: ""
 
@@ -59,7 +62,8 @@ variables:
   - name: PowerPlatformServiceConnection
     value: "PowerPlatformDev"
 
-  # Power Platform environment URL for the dev environment
+  # Power Platform environment URL for the dev environment.
+  # This is also where the Export Request custom tables live.
   - name: EnvironmentUrl
     value: "https://yourorg.crm.dynamics.com"
 
@@ -67,6 +71,29 @@ variables:
   # Used to mark old patches as obsolete so developers work on the new version.
   - name: PatchDisplayNamePrefix
     value: "(DO NOT USE) "
+
+  # -----------------------------------------------------------------------
+  # Dataverse table/column names for the Export Request custom tables.
+  # Update these to match your publisher prefix and schema names.
+  # -----------------------------------------------------------------------
+  - name: TableExportRequest
+    value: "cr_exportrequests"
+  - name: TableExportRequestSolution
+    value: "cr_exportrequestsolutions"
+  - name: TableConfigDataDefinition
+    value: "cr_configdatadefinitions"
+
+  # Export Request status choice values (update to match your option set)
+  - name: StatusDraft
+    value: "0"
+  - name: StatusQueued
+    value: "1"
+  - name: StatusInProgress
+    value: "2"
+  - name: StatusCompleted
+    value: "3"
+  - name: StatusFailed
+    value: "4"
 
   # Secret variables (configure in pipeline UI or link a variable group):
   #   ClientId     - Service Principal Application (Client) ID
@@ -91,119 +118,260 @@ steps:
     displayName: "Install Power Platform Build Tools"
 
   # ===========================================================================
-  # Step 3: Detect export branch for today's date
+  # Step 3: Query Dataverse for a queued Export Request
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      # Determine target date
-      if ("${{ parameters.dateOverride }}") {
-        $targetDate = "${{ parameters.dateOverride }}"
-        Write-Host "Using override date: $targetDate"
-      } else {
-        # Use Eastern Time for date calculation
-        $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
-        $targetDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $eastern).ToString("yyyy-MM-dd")
-        Write-Host "Using today's date (Eastern): $targetDate"
+      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+
+      # ---------------------------------------------------------------
+      # Acquire OAuth token for Dataverse Web API
+      # ---------------------------------------------------------------
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
       }
 
-      # Determine export branch
-      $exportBranch = "${{ parameters.exportBranch }}"
+      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+      $apiHeaders = @{
+        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+        "OData-MaxVersion" = "4.0"
+        "OData-Version"    = "4.0"
+        "Content-Type"     = "application/json"
+        "Accept"           = "application/json"
+      }
 
-      if ($exportBranch) {
-        Write-Host "Using override export branch: $exportBranch"
+      Write-Host "Authenticated with Dataverse API."
+
+      # ---------------------------------------------------------------
+      # Find the Export Request to process
+      # ---------------------------------------------------------------
+      $baseUrl = "$envUrl/api/data/v9.2"
+      $overrideId = "${{ parameters.exportRequestId }}"
+
+      if ($overrideId) {
+        Write-Host "Using override export request ID: $overrideId"
+        $requestUrl = "$baseUrl/$(TableExportRequest)($overrideId)"
+        try {
+          $request = Invoke-RestMethod -Uri $requestUrl -Headers $apiHeaders
+        } catch {
+          Write-Error "Export request not found: $overrideId — $($_.Exception.Message)"
+          exit 1
+        }
       } else {
-        Write-Host "Auto-detecting export branch matching: export/$targetDate-*"
+        Write-Host "Querying for next queued export request..."
+        $filter = "cr_status eq $(StatusQueued)"
+        $requestUrl = "$baseUrl/$(TableExportRequest)?`$filter=$filter&`$orderby=createdon asc&`$top=1"
+        $result = Invoke-RestMethod -Uri $requestUrl -Headers $apiHeaders
+        $requests = @($result.value)
 
-        $refs = git ls-remote --heads origin "refs/heads/export/$targetDate-*" 2>&1
-
-        if ($LASTEXITCODE -ne 0 -or -not $refs) {
-          Write-Host "##vso[task.logissue type=warning]No export branch found for date $targetDate"
-          Write-Host "##vso[task.setvariable variable=ExportBranchFound]false"
-          Write-Host "No matching export branch found. Pipeline will skip remaining steps."
+        if ($requests.Count -eq 0) {
+          Write-Host "No queued export requests found. Pipeline will exit."
+          Write-Host "##vso[task.setvariable variable=HasExportRequest]false"
           exit 0
         }
 
-        # Extract branch names and sort alphabetically
-        $branchNames = @($refs -split "`n" |
-          Where-Object { $_.Trim() } |
-          ForEach-Object { ($_ -split "refs/heads/")[1].Trim() } |
-          Sort-Object)
-
-        if ($branchNames.Count -gt 1) {
-          Write-Host "##vso[task.logissue type=warning]Multiple export branches found for $targetDate. Using the first alphabetically."
-          foreach ($name in $branchNames) {
-            Write-Host "  Found: $name"
-          }
-        }
-
-        $exportBranch = $branchNames[0]
-        Write-Host "Detected export branch: $exportBranch"
+        $request = $requests[0]
       }
 
-      # Extract subfolder name (everything after 'export/')
-      $subfolder = $exportBranch -replace "^export/", ""
+      $requestId = $request.cr_exportrequestid
+      $requestName = $request.cr_name
+      $postExportVersion = $request.cr_postexportversion
 
-      Write-Host "Export branch: $exportBranch"
-      Write-Host "Subfolder:     $subfolder"
+      Write-Host ""
+      Write-Host "============================================"
+      Write-Host "  Export Request Found"
+      Write-Host "============================================"
+      Write-Host "  ID:                  $requestId"
+      Write-Host "  Name:                $requestName"
+      Write-Host "  Post-Export Version: $postExportVersion"
+
+      # ---------------------------------------------------------------
+      # Update request status to In Progress + set pipeline run URL
+      # ---------------------------------------------------------------
+      $pipelineUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+
+      $updateBody = @{
+        cr_status         = [int]$(StatusInProgress)
+        cr_pipelinerunurl = $pipelineUrl
+      } | ConvertTo-Json
+
+      Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequest)($requestId)" `
+        -Method Patch -Headers $apiHeaders -Body $updateBody
+
+      Write-Host "  Status:              In Progress"
+      Write-Host "  Pipeline URL:        $pipelineUrl"
+
+      # ---------------------------------------------------------------
+      # Query related solutions
+      # ---------------------------------------------------------------
+      $solFilter = "_cr_exportrequest_value eq '$requestId'"
+      $solUrl = "$baseUrl/$(TableExportRequestSolution)?`$filter=$solFilter&`$orderby=cr_sortorder asc,createdon asc"
+      $solResult = Invoke-RestMethod -Uri $solUrl -Headers $apiHeaders
+      $solutions = @($solResult.value)
+
+      if ($solutions.Count -eq 0) {
+        Write-Error "Export request has no solutions. Add solutions to the request before queuing."
+        Write-Host "##vso[task.setvariable variable=HasExportRequest]false"
+
+        # Mark request as failed
+        $failBody = @{
+          cr_status       = [int]$(StatusFailed)
+          cr_errordetails = "No solutions found on the export request."
+        } | ConvertTo-Json
+        Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequest)($requestId)" `
+          -Method Patch -Headers $apiHeaders -Body $failBody
+
+        exit 1
+      }
+
+      Write-Host ""
+      Write-Host "  Solutions ($($solutions.Count)):"
+      foreach ($s in $solutions) {
+        $settings = if ($s.cr_includedeploymentsettings) { " [+settings]" } else { "" }
+        Write-Host "    - $($s.cr_solutionname) (v$($s.cr_expectedversion))$settings"
+      }
+
+      # ---------------------------------------------------------------
+      # Query related config data definitions (optional)
+      # ---------------------------------------------------------------
+      $cdFilter = "_cr_exportrequest_value eq '$requestId'"
+      $cdUrl = "$baseUrl/$(TableConfigDataDefinition)?`$filter=$cdFilter"
+      $cdResult = Invoke-RestMethod -Uri $cdUrl -Headers $apiHeaders
+      $configDefs = @($cdResult.value)
+
+      if ($configDefs.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  Config Data ($($configDefs.Count)):"
+        foreach ($cd in $configDefs) {
+          Write-Host "    - $($cd.cr_name): $($cd.cr_entity)"
+        }
+      }
+
+      # ---------------------------------------------------------------
+      # Build build.json from Dataverse data
+      # ---------------------------------------------------------------
+      $buildConfig = @{
+        exportRequestId = $requestId
+      }
+
+      if ($postExportVersion) {
+        $buildConfig["postExportVersion"] = $postExportVersion
+      }
+
+      $buildConfig["solutions"] = @($solutions | ForEach-Object {
+        $sol = @{
+          name    = $_.cr_solutionname
+          version = $_.cr_expectedversion
+        }
+        if ($_.cr_includedeploymentsettings) {
+          $sol["includeDeploymentSettings"] = $true
+        }
+        $sol
+      })
+
+      if ($configDefs.Count -gt 0) {
+        $buildConfig["configData"] = @($configDefs | ForEach-Object {
+          $cd = @{
+            name       = $_.cr_name
+            entity     = $_.cr_entity
+            primaryKey = $_.cr_primarykey
+            select     = $_.cr_selectcolumns
+            dataFile   = $_.cr_datafile
+          }
+          if ($_.cr_filter) {
+            $cd["filter"] = $_.cr_filter
+          }
+          $cd
+        })
+      }
+
+      # ---------------------------------------------------------------
+      # Determine export folder name and create it
+      # ---------------------------------------------------------------
+      $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+      $today = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $eastern).ToString("yyyy-MM-dd")
+      $shortId = $requestId.Substring(0, 8)
+      $exportFolder = "$today-dv-$shortId"
+
+      $exportFolderPath = Join-Path "$(Build.SourcesDirectory)" "exports/$exportFolder"
+      New-Item -ItemType Directory -Path $exportFolderPath -Force | Out-Null
+
+      # Write build.json
+      $buildJsonPath = Join-Path $exportFolderPath "build.json"
+      $buildConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
+      Write-Host ""
+      Write-Host "  build.json written to: exports/$exportFolder/build.json"
+
+      # ---------------------------------------------------------------
+      # Store solution/configData IDs for later status updates
+      # ---------------------------------------------------------------
+      $solutionIds = @{}
+      foreach ($s in $solutions) {
+        $solutionIds[$s.cr_solutionname] = $s.cr_exportrequestsolutionid
+      }
+      $solutionIdsJson = $solutionIds | ConvertTo-Json -Compress
+
+      # ---------------------------------------------------------------
+      # Set pipeline variables for downstream steps
+      # ---------------------------------------------------------------
+      Write-Host "##vso[task.setvariable variable=HasExportRequest]true"
+      Write-Host "##vso[task.setvariable variable=ExportRequestId]$requestId"
+      Write-Host "##vso[task.setvariable variable=ExportFolder]$exportFolder"
+
+      # Pass solutions list in the same format downstream steps expect
+      $solutionsJson = @($buildConfig.solutions) | ConvertTo-Json -Compress
+      Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
+      Write-Host "##vso[task.setvariable variable=SolutionIdsJson]$solutionIdsJson"
+
+      # Config data
+      if ($configDefs.Count -gt 0) {
+        $configDataJson = @($buildConfig.configData) | ConvertTo-Json -Compress -Depth 10
+        Write-Host "##vso[task.setvariable variable=ConfigDataList]$configDataJson"
+        Write-Host "##vso[task.setvariable variable=HasConfigData]true"
+      } else {
+        Write-Host "##vso[task.setvariable variable=HasConfigData]false"
+      }
+
+      # Post export version
+      if ($postExportVersion) {
+        Write-Host "##vso[task.setvariable variable=PostExportVersion]$postExportVersion"
+      }
+
+      Write-Host ""
+      Write-Host "Export request loaded. Ready to export."
+    displayName: "Query Dataverse for export request"
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 4: Create a working branch for this export
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $exportBranch = "export/$(ExportFolder)"
+
+      Write-Host "Creating working branch: $exportBranch"
+
+      git checkout -b "$exportBranch"
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to create branch: $exportBranch"
+        exit 1
+      }
 
       Write-Host "##vso[task.setvariable variable=ExportBranch]$exportBranch"
-      Write-Host "##vso[task.setvariable variable=ExportSubfolder]$subfolder"
-      Write-Host "##vso[task.setvariable variable=ExportBranchFound]true"
-    displayName: "Detect export branch"
+      Write-Host "Working branch created: $exportBranch"
+    displayName: "Create export branch"
+    condition: eq(variables['HasExportRequest'], 'true')
 
   # ===========================================================================
-  # Step 4: Checkout the export branch
-  # ===========================================================================
-  - pwsh: |
-      $ErrorActionPreference = "Stop"
-
-      Write-Host "Fetching export branch: $(ExportBranch)"
-      git fetch origin "$(ExportBranch)"
-
-      Write-Host "Checking out: $(ExportBranch)"
-      git checkout "$(ExportBranch)"
-      git pull origin "$(ExportBranch)"
-
-      Write-Host "Successfully checked out $(ExportBranch)"
-    displayName: "Checkout export branch"
-    condition: eq(variables['ExportBranchFound'], 'true')
-
-  # ===========================================================================
-  # Step 5: Read build.json and extract solutions list
-  # ===========================================================================
-  - pwsh: |
-      $ErrorActionPreference = "Stop"
-
-      $buildJsonPath = Join-Path "$(Build.SourcesDirectory)" "exports/$(ExportSubfolder)/build.json"
-      Write-Host "Reading build configuration from: $buildJsonPath"
-
-      if (-not (Test-Path $buildJsonPath)) {
-        Write-Error "build.json not found at: $buildJsonPath"
-        exit 1
-      }
-
-      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
-      $solutions = $buildConfig.solutions
-
-      if (-not $solutions -or $solutions.Count -eq 0) {
-        Write-Error "No solutions specified in build.json"
-        exit 1
-      }
-
-      Write-Host "Solutions to export ($($solutions.Count)):"
-      foreach ($s in $solutions) {
-        Write-Host "  - $($s.name) (v$($s.version))"
-      }
-
-      # Pass solutions list as a JSON variable for subsequent steps
-      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
-      Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
-    displayName: "Read build.json configuration"
-    condition: eq(variables['ExportBranchFound'], 'true')
-
-  # ===========================================================================
-  # Step 6: Authenticate pac CLI with Power Platform
+  # Step 5: Authenticate pac CLI with Power Platform
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -224,12 +392,12 @@ steps:
       Write-Host "Successfully authenticated with Power Platform"
       pac auth list
     displayName: "Authenticate with Power Platform"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: eq(variables['HasExportRequest'], 'true')
     env:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 7: Export solutions (unmanaged), clean unpack, and pack as managed
+  # Step 6: Export solutions (unmanaged), clean unpack, and pack as managed
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -362,7 +530,7 @@ steps:
         }
 
         # -----------------------------------------------------------------
-        # Validate solution version in dev matches build.json
+        # Validate solution version in dev matches expected version
         # -----------------------------------------------------------------
         $solutionXmlPath = Join-Path $solutionUnpackDir "Other/Solution.xml"
         if (-not (Test-Path $solutionXmlPath)) {
@@ -374,10 +542,10 @@ steps:
         [xml]$solutionXml = Get-Content $solutionXmlPath
         $actualVersion = $solutionXml.ImportExportXml.SolutionManifest.Version
         Write-Host "  Version in dev environment: $actualVersion"
-        Write-Host "  Version in build.json:      $version"
+        Write-Host "  Expected version:           $version"
 
         if ($actualVersion -ne $version) {
-          Write-Error "Version mismatch for '$name': build.json specifies v$version but dev environment has v$actualVersion. Update build.json to match the dev environment before re-running."
+          Write-Error "Version mismatch for '$name': export request specifies v$version but dev environment has v$actualVersion. Update the Export Request Solution record to match."
           $failedSolutions += $name
           continue
         }
@@ -433,31 +601,35 @@ steps:
       }
 
       # -----------------------------------------------------------------
-      # Write updated build.json (with includesCloudFlows flags) and stage
+      # Write updated build.json (with auto-detected flags) and stage
       # -----------------------------------------------------------------
-      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
-      $updatedConfig = @{ solutions = @($solutions) }
+      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportFolder)/build.json"
+      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+      $buildConfig.solutions = @($solutions)
 
-      # Preserve postExportVersion if it exists in the original config
-      if ($buildConfig.PSObject.Properties["postExportVersion"] -and $buildConfig.postExportVersion) {
-        $updatedConfig["postExportVersion"] = $buildConfig.postExportVersion
-      }
-
-      $updatedConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
+      $buildConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
       Write-Host "Updated build.json with detection results."
 
       Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
       Write-Host "Staged build.json for artifact publishing."
 
       # -----------------------------------------------------------------
-      # Stage deployment settings files (if any solution uses them)
+      # Stage deployment settings files from root (if any solution uses them)
       # -----------------------------------------------------------------
-      $exportFolder = Join-Path $sourceDir "exports/$(ExportSubfolder)"
-      $settingsFiles = Get-ChildItem -Path $exportFolder -Filter "deploymentSettings_*.json" -ErrorAction SilentlyContinue
-      if ($settingsFiles) {
-        foreach ($sf in $settingsFiles) {
-          Copy-Item -Path $sf.FullName -Destination "$(Build.ArtifactStagingDirectory)/$($sf.Name)"
-          Write-Host "Staged deployment settings file: $($sf.Name)"
+      $rootSettingsDir = Join-Path $sourceDir "deploymentSettings"
+      $hasSettings = $solutions | Where-Object {
+        $_.PSObject.Properties["includeDeploymentSettings"] -and $_.includeDeploymentSettings
+      }
+
+      if ($hasSettings) {
+        $settingsFiles = Get-ChildItem -Path $rootSettingsDir -Filter "deploymentSettings_*.json" -ErrorAction SilentlyContinue
+        if ($settingsFiles) {
+          foreach ($sf in $settingsFiles) {
+            # Skip Dev settings — not needed for release pipeline (QA/Stage/Prod only)
+            if ($sf.Name -eq "deploymentSettings_Dev.json") { continue }
+            Copy-Item -Path $sf.FullName -Destination "$(Build.ArtifactStagingDirectory)/$($sf.Name)"
+            Write-Host "Staged deployment settings file: $($sf.Name)"
+          }
         }
       }
 
@@ -485,29 +657,18 @@ steps:
       $solutionsJson = @($solutions) | ConvertTo-Json -Compress
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
 
-      # Pass configData and postExportVersion forward for downstream steps
-      if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData.Count -gt 0) {
-        $configDataJson = @($buildConfig.configData) | ConvertTo-Json -Compress -Depth 10
-        Write-Host "##vso[task.setvariable variable=ConfigDataList]$configDataJson"
-        Write-Host "##vso[task.setvariable variable=HasConfigData]true"
-        Write-Host "Config data sets found: $($buildConfig.configData.Count)"
-      } else {
-        Write-Host "##vso[task.setvariable variable=HasConfigData]false"
-        Write-Host "No configData defined in build.json."
-      }
-
       Write-Host "All solutions processed successfully."
     displayName: "Export, unpack, and pack solutions"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: eq(variables['HasExportRequest'], 'true')
 
   # ===========================================================================
-  # Step 8: Extract configuration data from Dev (if configData defined)
+  # Step 7: Extract configuration data from Dev (if configData defined)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
       if ("$(HasConfigData)" -ne "true") {
-        Write-Host "No configData in build.json — skipping extraction."
+        Write-Host "No configData in export request — skipping extraction."
         exit 0
       }
 
@@ -554,33 +715,33 @@ steps:
         }
       }
     displayName: "Extract config data from Dev"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: eq(variables['HasExportRequest'], 'true')
     env:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 9: Publish managed solutions and build.json as pipeline artifact
+  # Step 8: Publish managed solutions and build.json as pipeline artifact
   # ===========================================================================
   - task: PublishPipelineArtifact@1
     displayName: "Publish managed solution artifacts"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: eq(variables['HasExportRequest'], 'true')
     inputs:
       targetPath: $(Build.ArtifactStagingDirectory)
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 10: Post-export version management (bump versions in Dev)
+  # Step 9: Post-export version management (bump versions in Dev)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
       $sourceDir = "$(Build.SourcesDirectory)"
-      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
+      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportFolder)/build.json"
       $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
 
       # Check for postExportVersion
       if (-not $buildConfig.PSObject.Properties["postExportVersion"] -or -not $buildConfig.postExportVersion) {
-        Write-Host "No postExportVersion in build.json. Skipping version management."
+        Write-Host "No postExportVersion in export request. Skipping version management."
         exit 0
       }
 
@@ -710,34 +871,12 @@ steps:
 
       Write-Host "Post-export version management complete. All solutions updated to v$postVersion."
     displayName: "Post-export version management"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: eq(variables['HasExportRequest'], 'true')
     env:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 11: Merge export deployment settings into root
-  # ===========================================================================
-  - pwsh: |
-      $ErrorActionPreference = "Stop"
-
-      $sourceDir = "$(Build.SourcesDirectory)"
-      $exportFolder = Join-Path $sourceDir "exports/$(ExportSubfolder)"
-      $rootFolder = Join-Path $sourceDir "deploymentSettings"
-      $mergeScript = Join-Path $sourceDir "scripts/Merge-DeploymentSettings.ps1"
-
-      # Only run if deployment settings files exist in the export folder
-      $settingsFiles = Get-ChildItem -Path $exportFolder -Filter "deploymentSettings_*.json" -ErrorAction SilentlyContinue
-      if (-not $settingsFiles -or $settingsFiles.Count -eq 0) {
-        Write-Host "No deployment settings files in export folder. Skipping merge."
-        exit 0
-      }
-
-      & $mergeScript -ExportFolder $exportFolder -RootFolder $rootFolder
-    displayName: "Merge deployment settings into root"
-    condition: eq(variables['ExportBranchFound'], 'true')
-
-  # ===========================================================================
-  # Step 12: Commit and push changes to the export branch
+  # Step 10: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -745,14 +884,14 @@ steps:
       git config user.email "pipeline@dev.azure.com"
       git config user.name "Azure DevOps Pipeline"
 
-      # Stage solution files, deployment settings, config data, and updated build.json
+      # Stage solution files, deployment settings, config data, and build.json
       git add solutions/
       git add deploymentSettings/
       git add configData/
-      git add "exports/$(ExportSubfolder)/build.json"
+      git add "exports/$(ExportFolder)/build.json"
 
       # Check for changes
-      $status = git status --porcelain solutions/ deploymentSettings/ configData/ "exports/$(ExportSubfolder)/build.json"
+      $status = git status --porcelain solutions/ deploymentSettings/ configData/ "exports/$(ExportFolder)/build.json"
       if (-not $status) {
         Write-Host "No changes detected in solutions/, deploymentSettings/, configData/, or build.json."
         Write-Host "##vso[task.setvariable variable=HasChanges]false"
@@ -760,16 +899,16 @@ steps:
       }
 
       Write-Host "Changes detected:"
-      git status --short solutions/ deploymentSettings/ configData/ "exports/$(ExportSubfolder)/"
+      git status --short solutions/ deploymentSettings/ configData/ "exports/$(ExportFolder)/"
 
       Write-Host "##vso[task.setvariable variable=HasChanges]true"
 
       # Commit
-      $commitMsg = "chore: export Power Platform solutions [$(ExportSubfolder)]"
+      $commitMsg = "chore: export Power Platform solutions [$(ExportFolder)]"
       git commit -m "$commitMsg"
 
       # Push
-      git push origin "$(ExportBranch)"
+      git push -u origin "$(ExportBranch)"
 
       if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to push changes to $(ExportBranch)"
@@ -778,10 +917,10 @@ steps:
 
       Write-Host "Changes committed and pushed to $(ExportBranch)"
     displayName: "Commit and push solution files"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: eq(variables['HasExportRequest'], 'true')
 
   # ===========================================================================
-  # Step 13: Create a Pull Request and auto-complete (merge) into main
+  # Step 11: Create a Pull Request and auto-complete (merge) into main
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -806,12 +945,12 @@ steps:
       $prBody = @{
         sourceRefName = "refs/heads/$(ExportBranch)"
         targetRefName = "refs/heads/main"
-        title         = "Export Power Platform Solutions - $(ExportSubfolder)"
+        title         = "Export Power Platform Solutions - $(ExportFolder)"
         description   = @"
-## Automated Solution Export
+## Automated Solution Export (Dataverse-Driven)
 
 **Branch:** ``$(ExportBranch)``
-**Date:** $(ExportSubfolder)
+**Export Request ID:** ``$(ExportRequestId)``
 
 ### Solutions Exported
 $solutionBullets
@@ -822,7 +961,7 @@ $solutionBullets
 - ``solutions/managed/``   - Managed solution zip files
 
 ---
-*This PR was created automatically by the export-solutions pipeline.*
+*This PR was created automatically by the export-solutions pipeline from a Dataverse Export Request.*
 "@
       } | ConvertTo-Json -Depth 5
 
@@ -851,7 +990,7 @@ $solutionBullets
         completionOptions = @{
           deleteSourceBranch = $true
           mergeStrategy      = "squash"
-          mergeCommitMessage = "chore: export Power Platform solutions [$(ExportSubfolder)]"
+          mergeCommitMessage = "chore: export Power Platform solutions [$(ExportFolder)]"
         }
       } | ConvertTo-Json -Depth 5
 
@@ -891,7 +1030,7 @@ $solutionBullets
         completionOptions     = @{
           deleteSourceBranch = $true
           mergeStrategy      = "squash"
-          mergeCommitMessage = "chore: export Power Platform solutions [$(ExportSubfolder)]"
+          mergeCommitMessage = "chore: export Power Platform solutions [$(ExportFolder)]"
         }
       } | ConvertTo-Json -Depth 5
 
@@ -905,6 +1044,159 @@ $solutionBullets
 
       Write-Host "`nPull Request processing complete."
     displayName: "Create and merge Pull Request"
-    condition: and(eq(variables['ExportBranchFound'], 'true'), eq(variables['HasChanges'], 'true'))
+    condition: and(eq(variables['HasExportRequest'], 'true'), eq(variables['HasChanges'], 'true'))
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  # ===========================================================================
+  # Step 12: Update Export Request status in Dataverse (final)
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+      $requestId = "$(ExportRequestId)"
+
+      if (-not $requestId) {
+        Write-Host "No export request ID — skipping status update."
+        exit 0
+      }
+
+      # ---------------------------------------------------------------
+      # Acquire OAuth token
+      # ---------------------------------------------------------------
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
+      }
+
+      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+      $apiHeaders = @{
+        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+        "OData-MaxVersion" = "4.0"
+        "OData-Version"    = "4.0"
+        "Content-Type"     = "application/json"
+        "Accept"           = "application/json"
+      }
+
+      $baseUrl = "$envUrl/api/data/v9.2"
+
+      # ---------------------------------------------------------------
+      # Update per-solution statuses
+      # ---------------------------------------------------------------
+      $solutionIds = "$(SolutionIdsJson)" | ConvertFrom-Json
+      $solutions = @("$(SolutionsList)" | ConvertFrom-Json)
+      $allSucceeded = $true
+
+      foreach ($sol in $solutions) {
+        $name = $sol.name
+        $solRecordId = $solutionIds.$name
+
+        if (-not $solRecordId) {
+          Write-Host "  No Dataverse record ID for solution '$name' — skipping status update."
+          continue
+        }
+
+        # Determine per-solution status (if the pipeline got this far, solutions succeeded)
+        $solBody = @{
+          cr_status = [int]$(StatusCompleted)
+        }
+
+        # Set auto-detected flags
+        if ($sol.PSObject.Properties["includesCloudFlows"] -and $sol.includesCloudFlows) {
+          $solBody["cr_includescloudflows"] = $true
+        }
+        if ($sol.PSObject.Properties["isPatch"] -and $sol.isPatch) {
+          $solBody["cr_ispatch"] = $true
+          if ($sol.parentSolution) {
+            $solBody["cr_parentsolution"] = $sol.parentSolution
+          }
+        }
+
+        try {
+          Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequestSolution)($solRecordId)" `
+            -Method Patch -Headers $apiHeaders -Body ($solBody | ConvertTo-Json)
+          Write-Host "  Updated solution '$name' status: Completed"
+        } catch {
+          Write-Host "##vso[task.logissue type=warning]Failed to update solution '$name' status: $($_.Exception.Message)"
+        }
+      }
+
+      # ---------------------------------------------------------------
+      # Update request to Completed
+      # ---------------------------------------------------------------
+      $requestBody = @{
+        cr_status      = [int]$(StatusCompleted)
+        cr_completedon = (Get-Date -Format "o")
+      } | ConvertTo-Json
+
+      try {
+        Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequest)($requestId)" `
+          -Method Patch -Headers $apiHeaders -Body $requestBody
+        Write-Host "Export request marked as Completed."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Failed to update export request status: $($_.Exception.Message)"
+      }
+
+      Write-Host ""
+      Write-Host "============================================"
+      Write-Host "  Export Complete"
+      Write-Host "============================================"
+      Write-Host "  Export Request: $requestId"
+      Write-Host "  Solutions:     $($solutions.Count)"
+      Write-Host "  Status:        Completed"
+    displayName: "Update export request status in Dataverse"
+    condition: and(not(canceled()), eq(variables['HasExportRequest'], 'true'))
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 12b: Mark export request as Failed (runs only on failure)
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Continue"
+
+      $requestId = "$(ExportRequestId)"
+      if (-not $requestId) { exit 0 }
+
+      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+
+      # Acquire OAuth token
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
+      }
+
+      try {
+        $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+        $apiHeaders = @{
+          "Authorization"    = "Bearer $($tokenResponse.access_token)"
+          "OData-MaxVersion" = "4.0"
+          "OData-Version"    = "4.0"
+          "Content-Type"     = "application/json"
+          "Accept"           = "application/json"
+        }
+
+        $failBody = @{
+          cr_status       = [int]$(StatusFailed)
+          cr_completedon  = (Get-Date -Format "o")
+          cr_errordetails = "Pipeline failed. See pipeline run for details."
+        } | ConvertTo-Json
+
+        Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/$(TableExportRequest)($requestId)" `
+          -Method Patch -Headers $apiHeaders -Body $failBody
+
+        Write-Host "Export request marked as Failed."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not update export request failure status: $($_.Exception.Message)"
+      }
+    displayName: "Mark export request as Failed (on error)"
+    condition: and(failed(), ne(variables['ExportRequestId'], ''))
+    env:
+      ClientSecret: $(ClientSecret)
