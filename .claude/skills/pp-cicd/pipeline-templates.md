@@ -20,6 +20,10 @@ schedules:
     always: true
 
 parameters:
+  - name: exportRequestId
+    displayName: "Override export request ID (leave empty to pick next queued request)"
+    type: string
+    default: ""
   - name: exportBranch
     displayName: "Override export branch name (skip auto-detect)"
     type: string
@@ -37,6 +41,23 @@ variables:
   # PatchDisplayNamePrefix only if patch support enabled
   - name: PatchDisplayNamePrefix
     value: "(DO NOT USE) "
+  # Dataverse table names (only if Export Request tables enabled)
+  - name: TableExportRequest
+    value: "{export_request_table}"          # e.g., "cr_exportrequests"
+  - name: TableExportRequestSolution
+    value: "{export_request_solution_table}" # e.g., "cr_exportrequestsolutions"
+  - name: TableConfigDataDefinition
+    value: "{config_data_def_table}"         # e.g., "cr_configdatadefinitions"
+  - name: StatusDraft
+    value: "0"
+  - name: StatusQueued
+    value: "1"
+  - name: StatusInProgress
+    value: "2"
+  - name: StatusCompleted
+    value: "3"
+  - name: StatusFailed
+    value: "4"
 
 pool:
   vmImage: "windows-latest"
@@ -53,10 +74,23 @@ steps:
   # 3. Authenticate pac CLI (using secret pipeline variables)
   # See patterns.md: "Secret Pipeline Variables" pattern
 
+  # 3b. (If Dataverse Export Request tables enabled) Acquire OAuth token + Query Dataverse
+  #    - Acquire OAuth token for Dataverse API (same credentials as pac CLI)
+  #    - Query for Export Request: use exportRequestId parameter if provided, else find Queued request
+  #    - Exit gracefully if no queued request found
+  #    - Update Export Request to In Progress + set cr_pipelinerunurl
+  #    - Query Export Request Solutions (ordered by cr_sortorder asc, createdon asc)
+  #    - Fail Export Request if no solutions found
+  #    - Query Config Data Definitions (if config data enabled)
+  #    - Build build.json from Dataverse data (includes exportRequestId)
+  #    - Set pipeline variables: ExportRequestId, SolutionIdsJson (for later updates)
+  #    See patterns.md: "Dataverse Export Request Patterns"
+
   # 4. Detect export branch (or use override)
   # Logic: convert UTC to Eastern Time, find branch matching export/{date}-*
 
   # 5. Read build.json from export branch
+  #    (If Dataverse tables enabled: build.json was created in step 3b, not read from branch)
 
   # 6. For each solution in build.json:
   #    a. Check cache (skip if managed zip exists for name+version)
@@ -95,14 +129,28 @@ steps:
   # 12. Commit and push to export branch (solutions/, configData/, deploymentSettings/)
 
   # 13. Create PR to main (auto-complete, squash merge)
+
+  # 14. (If Dataverse Export Request tables enabled) Update Dataverse completion status
+  #     - Update each Export Request Solution record: cr_status=Completed, cr_includescloudflows, cr_ispatch, cr_parentsolution
+  #     - Update Export Request: cr_status=Completed, cr_completedon=timestamp
+  #     See patterns.md: "Update Per-Solution Status After Export", "Mark Export Request Completed"
+
+  # 15. (If Dataverse Export Request tables enabled) Failure handler step
+  #     - condition: and(failed(), ne(variables['ExportRequestId'], ''))
+  #     - Acquires fresh OAuth token (previous may be in failed step's scope)
+  #     - Updates Export Request: cr_status=Failed, cr_completedon=timestamp, cr_errordetails
+  #     See patterns.md: "Export Pipeline Failure Handler"
 ```
 
 ### Key Generation Rules
 
 - Steps 8, 10-11 are conditional (only generate if respective features enabled)
+- Steps 3b, 14-15 are conditional (only generate if Dataverse Export Request tables enabled)
+- Step 15 (failure handler) MUST be the last step and has `condition: and(failed(), ne(variables['ExportRequestId'], ''))`
 - The export loop (step 6) is a single large PowerShell step
 - Artifact staging copies files to `$(Build.ArtifactStagingDirectory)` before publish
 - PR creation uses `az repos pr create` CLI
+- When Dataverse tables are enabled, the `exportRequestId` pipeline parameter is always generated
 
 ---
 
@@ -127,6 +175,16 @@ resources:
 pool:
   vmImage: "windows-latest"
 
+# (If Dataverse Export Request tables enabled) Admin environment variables
+variables:
+  - name: AdminEnvironmentUrl
+    value: "{admin_environment_url}"         # e.g., "https://yourorg-dev.crm.dynamics.com"
+  - name: AdminClientId
+    value: "$(AdminClientId)"                # Set in ADO pipeline variables
+  - name: AdminTenantId
+    value: "$(AdminTenantId)"                # Set in ADO pipeline variables
+  # AdminClientSecret: configured as secret pipeline variable in ADO UI
+
 stages:
   # Generate one stage per environment using the template
   # First environment: dependsOn is empty (deploys automatically)
@@ -139,6 +197,12 @@ stages:
       environmentName: "{ado_env_1}"         # e.g., "Power Platform QA"
       variableGroup: "{var_group_1}"         # e.g., "PowerPlatform-QA"
       dependsOn: ""                          # Empty = no dependency (first stage)
+      # (If Dataverse Export Request tables enabled) Dataverse tracking parameters:
+      adminEnvironmentUrl: $(AdminEnvironmentUrl)
+      adminClientId: $(AdminClientId)
+      adminTenantId: $(AdminTenantId)
+      dataverseStatusField: "{env_1_status_field}"      # e.g., "cr_qadeploystatus"
+      dataverseCompletedField: "{env_1_completed_field}" # e.g., "cr_qacompletedon"
 
   - template: templates/deploy-environment.yml
     parameters:
@@ -147,6 +211,11 @@ stages:
       environmentName: "{ado_env_2}"
       variableGroup: "{var_group_2}"
       dependsOn: "{env_1_short}"             # e.g., "QA"
+      adminEnvironmentUrl: $(AdminEnvironmentUrl)
+      adminClientId: $(AdminClientId)
+      adminTenantId: $(AdminTenantId)
+      dataverseStatusField: "{env_2_status_field}"
+      dataverseCompletedField: "{env_2_completed_field}"
 
   # ... repeat for each environment
 ```
@@ -158,6 +227,9 @@ stages:
 - `dependsOn` chains stages sequentially
 - Pipeline resource alias (`ExportPipeline`) used in the template's download steps
 - The `source` value must match the exact ADO pipeline name
+- (If Dataverse tables enabled) Admin environment variables point to where Export Request tables live (typically the Dev environment)
+- (If Dataverse tables enabled) Each stage gets its own `dataverseStatusField` and `dataverseCompletedField` values. Naming convention: `cr_{env}deploystatus` and `cr_{env}completedon` (lowercase env name, replace `cr_` with publisher prefix)
+- `AdminClientSecret` is a secret pipeline variable configured in the ADO UI (not in YAML)
 
 ---
 
@@ -180,6 +252,34 @@ parameters:
   - name: dependsOn
     type: string
     default: ""
+  # (If Dataverse Export Request tables enabled) Admin environment parameters:
+  - name: adminEnvironmentUrl
+    type: string
+    default: ""
+  - name: adminClientId
+    type: string
+    default: ""
+  - name: adminTenantId
+    type: string
+    default: ""
+  - name: dataverseStatusField
+    type: string
+    default: ""                              # e.g., "cr_qadeploystatus"
+  - name: dataverseCompletedField
+    type: string
+    default: ""                              # e.g., "cr_qacompletedon"
+  - name: dataverseExportRequestTable
+    type: string
+    default: "{export_request_table}"        # e.g., "cr_exportrequests"
+  - name: statusInProgress
+    type: string
+    default: "2"
+  - name: statusCompleted
+    type: string
+    default: "3"
+  - name: statusFailed
+    type: string
+    default: "4"
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -201,6 +301,10 @@ stages:
                 # 1. Download ManagedSolutions artifact from export pipeline
                 - download: ExportPipeline
                   artifact: ManagedSolutions
+
+                # 1b. (If Dataverse tables enabled) Read exportRequestId from build.json
+                #     + Update deploy status to In Progress + set cr_releasepipelineurl
+                #     See patterns.md: "Release Template — Read exportRequestId + Update Deploy Status (Start)"
 
                 # 2. Install Power Platform Build Tools
                 - task: PowerPlatformToolInstaller@2
@@ -231,6 +335,10 @@ stages:
                 #     - Read build.json from artifact
                 #     - Run scripts/Sync-ConfigData.ps1 -Mode Upsert
                 #     - Resolve data files from artifact directory
+
+                # 11. (If Dataverse tables enabled) Update deploy status to Completed/Failed
+                #     condition: and(not(canceled()), ne(variables['ExportRequestId'], ''))
+                #     See patterns.md: "Release Template — Update Deploy Status (End)"
 ```
 
 ### Key Generation Rules
@@ -241,6 +349,10 @@ stages:
 - Cloud flow activation is optional — only generate that section if feature enabled
 - Config data upsert is optional — only generate if config data migration enabled
 - The entire deploy loop is one PowerShell step (for variable sharing)
+- (If Dataverse tables enabled) Steps 1b and 11 are generated for Dataverse status tracking
+- (If Dataverse tables enabled) Step 1b reads `exportRequestId` from build.json, sets `ExportRequestId` pipeline variable, and updates the per-stage status field to In Progress. If no `exportRequestId` found, it sets the variable to empty and skips all Dataverse updates gracefully.
+- (If Dataverse tables enabled) Step 11 MUST be the last step with condition `and(not(canceled()), ne(variables['ExportRequestId'], ''))`. Uses `$env:AGENT_JOBSTATUS` to determine Completed vs Failed.
+- (If Dataverse tables enabled) `AdminClientSecret` is passed via `env:` block from the release pipeline's secret variable: `env: AdminClientSecret: $(AdminClientSecret)`
 
 ---
 

@@ -105,6 +105,337 @@ steps:
     displayName: "Authenticate with Power Platform"
 ```
 
+## Dataverse Export Request Patterns
+
+These patterns are used when the **Dataverse Export Request tables** feature is enabled.
+
+### Pattern: Dataverse Table Variables
+
+```yaml
+variables:
+  - name: TableExportRequest
+    value: "cr_exportrequests"
+  - name: TableExportRequestSolution
+    value: "cr_exportrequestsolutions"
+  - name: TableConfigDataDefinition
+    value: "cr_configdatadefinitions"
+  - name: StatusDraft
+    value: "0"
+  - name: StatusQueued
+    value: "1"
+  - name: StatusInProgress
+    value: "2"
+  - name: StatusCompleted
+    value: "3"
+  - name: StatusFailed
+    value: "4"
+```
+
+Replace `cr_` with the user's publisher prefix. Status values are choice (option set) integer values.
+
+### Pattern: Query Export Request (Queue Lookup)
+
+```powershell
+$baseUrl = "$envUrl/api/data/v9.2"
+
+if ($overrideId) {
+  # Direct lookup by ID (manual run or Run Now cloud flow)
+  $requestUrl = "$baseUrl/$(TableExportRequest)($overrideId)"
+  $request = Invoke-RestMethod -Uri $requestUrl -Headers $apiHeaders
+} else {
+  # Queue lookup: oldest Queued request
+  $filter = "cr_status eq $(StatusQueued)"
+  $requestUrl = "$baseUrl/$(TableExportRequest)?`$filter=$filter&`$orderby=createdon asc&`$top=1"
+  $result = Invoke-RestMethod -Uri $requestUrl -Headers $apiHeaders
+
+  if ($result.value.Count -eq 0) {
+    Write-Host "No queued export requests found. Exiting gracefully."
+    Write-Host "##vso[task.setvariable variable=ExportRequestId]"
+    exit 0
+  }
+  $request = $result.value[0]
+}
+
+$requestId = $request.cr_exportrequestid
+$requestName = $request.cr_name
+$postExportVersion = $request.cr_postexportversion
+```
+
+**Key points:**
+- `$overrideId` comes from the `exportRequestId` pipeline parameter
+- Queue filter: `cr_status eq 1` (Queued), ordered oldest first, top 1
+- Graceful exit if no queued request found (not an error)
+
+### Pattern: Update Export Request Status
+
+```powershell
+# Set to In Progress with pipeline URL
+$pipelineUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+
+$updateBody = @{
+  cr_status         = [int]$(StatusInProgress)
+  cr_pipelinerunurl = $pipelineUrl
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequest)($requestId)" `
+  -Method Patch -Headers $apiHeaders -Body $updateBody
+```
+
+### Pattern: Query Export Request Solutions
+
+```powershell
+$solFilter = "_cr_exportrequest_value eq '$requestId'"
+$solUrl = "$baseUrl/$(TableExportRequestSolution)?`$filter=$solFilter&`$orderby=cr_sortorder asc,createdon asc"
+$solResult = Invoke-RestMethod -Uri $solUrl -Headers $apiHeaders
+$solutions = @($solResult.value)
+
+if ($solutions.Count -eq 0) {
+  $failBody = @{
+    cr_status       = [int]$(StatusFailed)
+    cr_errordetails = "No solutions found on the export request."
+  } | ConvertTo-Json
+  Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequest)($requestId)" `
+    -Method Patch -Headers $apiHeaders -Body $failBody
+  Write-Error "Export request has no solutions."
+  exit 1
+}
+```
+
+**Key points:**
+- Lookup relationship filter: `_cr_exportrequest_value eq 'GUID'` (note the underscore prefix and `_value` suffix for lookup columns)
+- Ordered by `cr_sortorder asc, createdon asc`
+- Fail the Export Request if no solutions found
+
+### Pattern: Query Config Data Definitions
+
+```powershell
+$cdFilter = "_cr_exportrequest_value eq '$requestId'"
+$cdUrl = "$baseUrl/$(TableConfigDataDefinition)?`$filter=$cdFilter"
+$cdResult = Invoke-RestMethod -Uri $cdUrl -Headers $apiHeaders
+$configDefs = @($cdResult.value)
+```
+
+### Pattern: Build build.json from Dataverse
+
+```powershell
+$buildConfig = @{
+  exportRequestId = $requestId
+}
+
+if ($postExportVersion) {
+  $buildConfig["postExportVersion"] = $postExportVersion
+}
+
+$buildConfig["solutions"] = @($solutions | ForEach-Object {
+  $sol = @{
+    name    = $_.cr_solutionname
+    version = $_.cr_expectedversion
+  }
+  if ($_.cr_includedeploymentsettings) {
+    $sol["includeDeploymentSettings"] = $true
+  }
+  $sol
+})
+
+if ($configDefs.Count -gt 0) {
+  $buildConfig["configData"] = @($configDefs | ForEach-Object {
+    $cd = @{
+      name       = $_.cr_name
+      entity     = $_.cr_entity
+      primaryKey = $_.cr_primarykey
+      select     = $_.cr_selectcolumns
+      dataFile   = $_.cr_datafile
+    }
+    if ($_.cr_filter) {
+      $cd["filter"] = $_.cr_filter
+    }
+    $cd
+  })
+}
+
+$buildConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
+```
+
+**Key points:**
+- `exportRequestId` is always included in build.json — the release pipeline reads it for Dataverse status tracking
+- Maps Dataverse column names (`cr_solutionname`) to build.json field names (`name`)
+- Config data definitions are optional
+
+### Pattern: Update Per-Solution Status After Export
+
+```powershell
+foreach ($sol in $solutions) {
+  $name = $sol.name
+  $solRecordId = $solutionIds.$name   # Stored earlier from cr_exportrequestsolutionid
+
+  $solBody = @{
+    cr_status = [int]$(StatusCompleted)
+  }
+
+  if ($sol.PSObject.Properties["includesCloudFlows"] -and $sol.includesCloudFlows) {
+    $solBody["cr_includescloudflows"] = $true
+  }
+  if ($sol.PSObject.Properties["isPatch"] -and $sol.isPatch) {
+    $solBody["cr_ispatch"] = $true
+    if ($sol.parentSolution) {
+      $solBody["cr_parentsolution"] = $sol.parentSolution
+    }
+  }
+
+  Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequestSolution)($solRecordId)" `
+    -Method Patch -Headers $apiHeaders -Body ($solBody | ConvertTo-Json)
+}
+```
+
+### Pattern: Mark Export Request Completed
+
+```powershell
+$requestBody = @{
+  cr_status      = [int]$(StatusCompleted)
+  cr_completedon = (Get-Date -Format "o")
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "$baseUrl/$(TableExportRequest)($requestId)" `
+  -Method Patch -Headers $apiHeaders -Body $requestBody
+```
+
+### Pattern: Export Pipeline Failure Handler
+
+This step runs only when the pipeline fails AND an Export Request was being processed.
+
+```powershell
+# condition: and(failed(), ne(variables['ExportRequestId'], ''))
+$requestId = "$(ExportRequestId)"
+
+$failBody = @{
+  cr_status       = [int]$(StatusFailed)
+  cr_completedon  = (Get-Date -Format "o")
+  cr_errordetails = "Pipeline failed. See pipeline run for details."
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/$(TableExportRequest)($requestId)" `
+  -Method Patch -Headers $apiHeaders -Body $failBody
+```
+
+### Pattern: Release Template — Read exportRequestId + Update Deploy Status (Start)
+
+Used by `deploy-environment.yml` at the beginning of each stage.
+
+```powershell
+$artifactDir = "$(Pipeline.Workspace)/ExportPipeline/ManagedSolutions"
+$buildJsonPath = Join-Path $artifactDir "build.json"
+
+if (-not (Test-Path $buildJsonPath)) {
+  Write-Host "No build.json found — skipping Dataverse status update."
+  Write-Host "##vso[task.setvariable variable=ExportRequestId]"
+  exit 0
+}
+
+$buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+
+if (-not $buildConfig.PSObject.Properties["exportRequestId"] -or -not $buildConfig.exportRequestId) {
+  Write-Host "No exportRequestId in build.json — Dataverse status tracking disabled."
+  Write-Host "##vso[task.setvariable variable=ExportRequestId]"
+  exit 0
+}
+
+$requestId = $buildConfig.exportRequestId
+Write-Host "##vso[task.setvariable variable=ExportRequestId]$requestId"
+
+# Acquire OAuth token for admin environment
+$tokenUrl = "https://login.microsoftonline.com/${{ parameters.adminTenantId }}/oauth2/v2.0/token"
+$tokenBody = @{
+  grant_type    = "client_credentials"
+  client_id     = "${{ parameters.adminClientId }}"
+  client_secret = $env:AdminClientSecret
+  scope         = "$adminUrl/.default"
+}
+
+$tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+$apiHeaders = @{ ... }  # Same as standard Dataverse headers
+
+$pipelineUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+$statusField = "${{ parameters.dataverseStatusField }}"
+
+$updateBody = @{
+  $statusField = [int]${{ parameters.statusInProgress }}
+  cr_releasepipelineurl = $pipelineUrl
+} | ConvertTo-Json
+
+try {
+  Invoke-RestMethod -Uri "$adminUrl/api/data/v9.2/${{ parameters.dataverseExportRequestTable }}($requestId)" `
+    -Method Patch -Headers $apiHeaders -Body $updateBody
+} catch {
+  Write-Host "##vso[task.logissue type=warning]Failed to update Dataverse status: $($_.Exception.Message)"
+}
+```
+
+### Pattern: Release Template — Update Deploy Status (End)
+
+Runs at the end of each stage regardless of success/failure (condition: `and(not(canceled()), ne(variables['ExportRequestId'], ''))`).
+
+```powershell
+$requestId = "$(ExportRequestId)"
+$statusField = "${{ parameters.dataverseStatusField }}"
+$completedField = "${{ parameters.dataverseCompletedField }}"
+
+# Acquire OAuth token (same pattern)
+# ...
+
+$succeeded = "$env:AGENT_JOBSTATUS" -eq "Succeeded"
+$statusValue = if ($succeeded) { [int]${{ parameters.statusCompleted }} } else { [int]${{ parameters.statusFailed }} }
+
+$updateBody = @{
+  $statusField = $statusValue
+}
+
+if ($completedField) {
+  $updateBody[$completedField] = (Get-Date -Format "o")
+}
+
+Invoke-RestMethod -Uri "$adminUrl/api/data/v9.2/${{ parameters.dataverseExportRequestTable }}($requestId)" `
+  -Method Patch -Headers $apiHeaders -Body ($updateBody | ConvertTo-Json)
+```
+
+**Key points:**
+- Uses `$env:AGENT_JOBSTATUS` to determine success/failure
+- Dataverse update failures are warnings (don't mask the real error)
+- `cr_releasepipelineurl` is set only on the start step (same URL for all stages)
+- Each stage updates its own field (e.g., `cr_qadeploystatus`, `cr_stagecompletedon`)
+
+### Pattern: Release Pipeline Admin Environment Variables
+
+```yaml
+# In release-solutions.yml
+variables:
+  - name: AdminEnvironmentUrl
+    value: "https://yourorg-dev.crm.dynamics.com"     # Where Export Request tables live
+  - name: AdminClientId
+    value: "$(AdminClientId)"                          # Set in pipeline variables
+  - name: AdminTenantId
+    value: "$(AdminTenantId)"                          # Set in pipeline variables
+  # AdminClientSecret: configured as secret pipeline variable in ADO UI
+
+# Passed to each stage template:
+- template: templates/deploy-environment.yml
+  parameters:
+    stageName: QA
+    displayName: "Deploy to QA"
+    environmentName: "Power Platform QA"
+    variableGroup: "PowerPlatform-QA"
+    adminEnvironmentUrl: $(AdminEnvironmentUrl)
+    adminClientId: $(AdminClientId)
+    adminTenantId: $(AdminTenantId)
+    dataverseStatusField: "cr_qadeploystatus"
+    dataverseCompletedField: "cr_qacompletedon"
+```
+
+**Key points:**
+- Admin credentials are separate from deployment credentials (may be same app registration but different variable source)
+- `AdminClientSecret` is a secret pipeline variable, passed via `env:` block to PowerShell
+- `dataverseStatusField` and `dataverseCompletedField` are different for each stage
+- Field names use the publisher prefix (replace `cr_` with actual prefix)
+
 ## Artifact Flow Patterns
 
 ### Pattern: Pipeline Resource Trigger
