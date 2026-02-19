@@ -99,7 +99,7 @@ If `postExportVersion` is set, the pipeline bumps versions in Dev **after** the 
 
 **Failure handling:** If the pipeline fails at any step after the Export Request is picked up, a dedicated failure handler step marks the request as **Failed** with an error details message and timestamp. This ensures users always see the correct status in the model-driven app.
 
-**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with an optional override to process a specific Export Request by ID.
+**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with an optional override to process a specific Export Request by ID. Can be triggered on-demand from Dataverse by setting an Export Request status to **Run Now** (requires a cloud flow; see [Run Now: Ad-Hoc Export via Cloud Flow](#run-now-ad-hoc-export-via-cloud-flow)).
 
 **Parameters (manual runs):**
 
@@ -527,7 +527,7 @@ The export pipeline queries three custom Dataverse tables to determine what to e
 | Column | Type | Description |
 |---|---|---|
 | `cr_name` | Text | Auto-generated or user-provided name (e.g., `2026-02-18-001`) |
-| `cr_status` | Choice | `0` = Draft, `1` = Queued, `2` = In Progress, `3` = Completed, `4` = Failed |
+| `cr_status` | Choice | `0` = Draft, `1` = Queued, `2` = In Progress, `3` = Completed, `4` = Failed, `5` = Run Now |
 | `cr_postexportversion` | Text | Optional. If set, the pipeline bumps all Dev solution versions to this after export |
 | `cr_pipelinerunurl` | URL | Set by the export pipeline &mdash; link to the ADO export build |
 | `cr_releasepipelineurl` | URL | Set by the release pipeline &mdash; link to the ADO release build |
@@ -574,10 +574,11 @@ Users interact with these tables through a model-driven app. The typical workflo
 1. **Create** an Export Request (status = Draft)
 2. **Add** solution rows with names, versions, and settings flags
 3. **Add** config data definitions if needed
-4. **Set** the request status to **Queued**
-5. **Wait** for the pipeline to pick it up (next scheduled run or manual trigger)
-6. **Monitor** status changes and click pipeline URLs to see ADO logs
-7. **Track** deployment progress through QA, Stage, and Prod from the same record
+4. **Choose** when to run:
+   - Set status to **Queued** &mdash; the next scheduled pipeline run (10 PM ET) picks it up
+   - Set status to **Run Now** &mdash; a cloud flow immediately triggers the pipeline (see [Run Now: Ad-Hoc Export via Cloud Flow](#run-now-ad-hoc-export-via-cloud-flow))
+5. **Monitor** status changes and click pipeline URLs to see ADO logs
+6. **Track** deployment progress through QA, Stage, and Prod from the same record
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -600,6 +601,142 @@ Users interact with these tables through a model-driven app. The typical workflo
 │  └──────────────────┴─────────┴────────────┴──────────┘      │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+### Run Now: Ad-Hoc Export via Cloud Flow
+
+Users can trigger the export pipeline immediately from the model-driven app by setting an Export Request status to **Run Now** (`5`). This requires a Power Automate cloud flow that watches for that status change and calls the Azure DevOps REST API to queue a pipeline run.
+
+**How it works:**
+
+```
+User sets status ──► Cloud flow triggers ──► ADO API queues pipeline ──► Pipeline processes request
+  to "Run Now"        (Dataverse trigger)     with exportRequestId        (same as scheduled run)
+```
+
+The pipeline receives the Export Request GUID as a parameter and processes it directly &mdash; it skips the queue lookup and behaves identically to a manual ADO run. The cloud flow does **not** fire for "Queued" status, so scheduled exports remain unaffected.
+
+**One-time setup:**
+
+#### Step 1: Create an Azure DevOps Personal Access Token (PAT)
+
+1. In Azure DevOps, click your profile icon &rarr; **Personal access tokens**
+2. Click **+ New Token**
+3. Set a descriptive name (e.g., `Power Automate - Queue Export Pipeline`)
+4. Set the **scope** to **Build** &rarr; **Read & execute**
+5. Set an expiration (max 1 year &mdash; set a reminder to rotate)
+6. Click **Create** and copy the token value
+
+> **Security note:** The PAT only needs Build read/execute scope. Do not grant broader permissions. Store it securely and rotate it before expiration.
+
+#### Step 2: Get Your Pipeline ID
+
+1. In Azure DevOps, go to **Pipelines** and click on the `export-solutions` pipeline
+2. Look at the URL &mdash; the pipeline ID is the number at the end: `https://dev.azure.com/{org}/{project}/_build?definitionId=42` &rarr; pipeline ID is `42`
+
+#### Step 3: Create the Cloud Flow
+
+1. Go to [make.powerautomate.com](https://make.powerautomate.com) and select your Dev environment
+2. Click **+ Create** &rarr; **Automated cloud flow**
+3. Name it `Export Request - Run Now` and select the trigger **When a row is added, modified or deleted (Microsoft Dataverse)**
+
+**Configure the trigger:**
+
+| Setting | Value |
+|---|---|
+| Change type | Modified |
+| Table name | Export Requests (`cr_exportrequests`) |
+| Scope | Organization |
+| Select columns | `cr_status` |
+| Filter rows | `cr_status eq 5` |
+
+> The `Filter rows` condition ensures the flow only fires when status changes to Run Now (`5`), not on any other status change.
+
+**Add actions:**
+
+4. Add a **Condition** action:
+   - `Status Value` **is equal to** `5` (Run Now)
+   - This is a safety check in case the filter row expression is not supported in your environment
+
+5. In the **If yes** branch, add an **HTTP** action:
+
+| Setting | Value |
+|---|---|
+| Method | `POST` |
+| URI | `https://dev.azure.com/{org}/{project}/_apis/pipelines/{pipelineId}/runs?api-version=7.1` |
+| Headers | `Content-Type`: `application/json` |
+| Authentication | Basic |
+| Username | (leave empty) |
+| Password | Your PAT from Step 1 |
+
+**Body:**
+
+```json
+{
+  "templateParameters": {
+    "exportRequestId": "@{triggerOutputs()?['body/cr_exportrequestid']}"
+  }
+}
+```
+
+> Replace `{org}`, `{project}`, and `{pipelineId}` with your values. The `cr_exportrequestid` field is the primary key GUID of the Export Request row &mdash; adjust the column name for your publisher prefix.
+
+6. After the HTTP action, add an **Update a row** action (Microsoft Dataverse):
+
+| Setting | Value |
+|---|---|
+| Table name | Export Requests |
+| Row ID | `Export Request` (from trigger) |
+| Status | `2` (In Progress) |
+
+> This immediately updates the status to In Progress so the user sees feedback in the app. The pipeline will also set In Progress when it starts, but this provides a faster visual response.
+
+7. In the **If no** branch, leave it empty (do nothing).
+
+8. **Save** the flow.
+
+**Complete flow summary:**
+
+```
+┌────────────────────────────────────────────────────┐
+│  Trigger: When Export Request is modified           │
+│  Filter:  cr_status eq 5 (Run Now)                 │
+│                                                     │
+│  ┌──────────────────────────────────────────────┐  │
+│  │  Condition: Status Value = 5                  │  │
+│  │                                               │  │
+│  │  Yes:                                         │  │
+│  │    1. HTTP POST to ADO Pipelines API          │  │
+│  │       → Queue export-solutions pipeline       │  │
+│  │       → Pass exportRequestId as parameter     │  │
+│  │                                               │  │
+│  │    2. Update row in Dataverse                 │  │
+│  │       → Set status to In Progress (2)         │  │
+│  │                                               │  │
+│  │  No:                                          │  │
+│  │    (do nothing)                               │  │
+│  └──────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────┘
+```
+
+**Testing the flow:**
+
+1. Create a test Export Request with at least one solution row
+2. Set the status to **Run Now**
+3. Verify:
+   - The cloud flow run appears in **Flow run history** with a Succeeded status
+   - The Export Request status changes to **In Progress** within seconds
+   - A new pipeline run appears in ADO &rarr; **Pipelines** &rarr; `export-solutions`
+   - The pipeline run has the `exportRequestId` parameter set to the record's GUID
+
+**Troubleshooting:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Flow doesn't trigger | Filter row expression not matching | Verify `cr_status eq 5` uses the correct column logical name for your publisher prefix. Test by removing the filter and using only the condition action |
+| HTTP action returns 401 | PAT expired or invalid | Generate a new PAT with Build Read & execute scope |
+| HTTP action returns 404 | Wrong org, project, or pipeline ID in the URI | Double-check the URI components against your ADO URL |
+| Pipeline runs but skips the request | `exportRequestId` parameter name mismatch | Ensure the pipeline YAML parameter is named `exportRequestId` (case-sensitive) and the flow body uses the correct column name |
+| Status doesn't update to In Progress | Update row action failed | Check that the flow's Dataverse connection has write access to the Export Request table |
 
 ---
 
@@ -871,11 +1008,13 @@ The daily pipeline runs automatically every day at **10:00 PM ET**. No action is
    - **Include Deployment Settings**: Set to **Yes** on one solution if needed
 4. Optionally add **Config Data Definition** rows (see [Configuration Data](#configuration-data))
 5. Optionally set **Post Export Version** (e.g., `2.0.0.0`)
-6. Set the request status to **Queued**
+6. Choose when to run:
+   - Set the request status to **Queued** &mdash; the next scheduled run (10 PM ET) picks it up
+   - Set the request status to **Run Now** &mdash; a cloud flow immediately triggers the pipeline (requires one-time setup; see [Run Now: Ad-Hoc Export via Cloud Flow](#run-now-ad-hoc-export-via-cloud-flow))
 
-The next pipeline run (scheduled or manual) will pick up the request and process it. Status and pipeline links will be visible on the record as it progresses.
+Status and pipeline links will be visible on the record as it progresses.
 
-**To run manually:** Go to **Pipelines** > select `export-solutions` > **Run pipeline**. Optionally enter an `exportRequestId` to process a specific request.
+**To run manually from ADO:** Go to **Pipelines** > select `export-solutions` > **Run pipeline**. Optionally enter an `exportRequestId` to process a specific request.
 
 ### Release Pipeline (Automatic + Manual Approval)
 
