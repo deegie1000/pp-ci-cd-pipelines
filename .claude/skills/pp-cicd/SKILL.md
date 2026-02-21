@@ -243,7 +243,7 @@ These are the **hardened design decisions** from production use. Do not deviate 
 - Conditional `dependsOn`: empty array for first stage, previous stage name for others
 
 ### Import Options
-- Always use: `--force-overwrite`, `--activate-plugins`
+- Always use: `--stage-and-upgrade`, `--skip-lower-version`, `--activate-plugins`
 - Conditionally use: `--settings-file` (only when deployment settings enabled and file exists)
 - Solution import via `pac solution import` (pac CLI, not ADO tasks) for deployment stages
 
