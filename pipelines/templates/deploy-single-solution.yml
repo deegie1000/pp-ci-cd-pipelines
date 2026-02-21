@@ -115,7 +115,8 @@ stages:
                     $importArgs = @(
                       "solution", "import",
                       "--path", $solutionZip,
-                      "--force-overwrite",
+                      "--stage-and-upgrade",
+                      "--skip-lower-version",
                       "--activate-plugins"
                     )
 

@@ -318,7 +318,7 @@ stages:
                 # 7. Acquire OAuth token (if cloud flow activation enabled)
                 # 8. Deploy each solution in order:
                 #    - Skip if already at target version
-                #    - Import with --force-overwrite --activate-plugins
+                #    - Import with --stage-and-upgrade --skip-lower-version --activate-plugins
                 #    - Apply --settings-file if includeDeploymentSettings
                 #    - Activate cloud flows if includesCloudFlows
                 # 9. Print summary (deployed/skipped/failed counts)
@@ -595,7 +595,7 @@ stages:
                 # 5. Import solution
                 #    - Find zip in DeploySolution artifact
                 #    - Check for deploymentSettings_{stageName}.json in repo root
-                #    - Import with --force-overwrite --activate-plugins
+                #    - Import with --stage-and-upgrade --skip-lower-version --activate-plugins
                 #    - Apply --settings-file if found
 
                 # 6. Upsert config data (if build.json has configData in artifact)

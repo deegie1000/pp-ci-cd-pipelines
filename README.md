@@ -128,7 +128,7 @@ Deploys managed solutions through three environments in sequence: **QA &rarr; St
    - **Skip** &mdash; if the solution is already installed at the target version
    - **Fresh install** &mdash; if the solution doesn't exist in the target environment
    - **Upgrade** &mdash; if the solution exists but at a different version
-   - Imports as managed with `--force-overwrite --activate-plugins`
+   - Imports as managed with `--stage-and-upgrade --skip-lower-version --activate-plugins`
    - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
    - If the solution has `includesCloudFlows: true`, checks for inactive cloud flows after import and attempts to activate them. Activation failures are logged as **warnings** but do not fail the deployment
 7. **Upserts configuration data** &mdash; if `configData` is defined in `build.json`, PATCHes each record into the target environment using stable GUIDs. Record-level failures are logged as **warnings** but do not fail the deployment. See [Configuration Data](#configuration-data)
@@ -234,7 +234,7 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │  8. PR to main           │    │  - Validates all artifacts upfront          │
 │  9. Update DV status     │    │  - Checks installed versions                │
 │                          │    │  - Skips if already at target version       │
-└──────────────────────────┘    │  - Imports managed + force-overwrite        │
+└──────────────────────────┘    │  - Imports managed + stage-and-upgrade      │
          │                      │  - Applies deployment settings if enabled   │
          ▼                      │  - Activates cloud flows (warn on failure)  │
 ┌──────────────────────────┐    │  - Updates Dataverse status (Completed)     │

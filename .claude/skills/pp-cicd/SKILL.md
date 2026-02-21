@@ -272,7 +272,7 @@ These are the **hardened design decisions** from production use. Do not deviate 
 - If Dataverse tracking enabled, each stage has two extra steps: (1) read `exportRequestId` from build.json + update status to In Progress at start, (2) update status to Completed/Failed + set timestamp at end (runs even on failure, condition: `and(not(canceled()), ne(variables['ExportRequestId'], ''))`)
 
 ### Import Options
-- Always use: `--force-overwrite`, `--activate-plugins`
+- Always use: `--stage-and-upgrade`, `--skip-lower-version`, `--activate-plugins`
 - Conditionally use: `--settings-file` (only when deployment settings enabled and file exists)
 - Solution import via `pac solution import` (pac CLI, not ADO tasks) for deployment stages
 

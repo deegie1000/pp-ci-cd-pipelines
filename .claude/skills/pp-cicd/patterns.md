@@ -610,7 +610,8 @@ foreach ($solution in $solutions) {
 $importArgs = @(
   "solution", "import",
   "--path", $zipPath,
-  "--force-overwrite",
+  "--stage-and-upgrade",
+  "--skip-lower-version",
   "--activate-plugins"
 )
 
