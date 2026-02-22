@@ -751,7 +751,7 @@ The repository includes [Pester](https://pester.dev) unit tests for the deployme
 Install-Module -Name Pester -Force -Scope CurrentUser
 
 # Run all tests
-Invoke-Pester tests/ -Show All
+Invoke-Pester tests/
 ```
 
 **Test suites:**
