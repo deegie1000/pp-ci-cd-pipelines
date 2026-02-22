@@ -74,36 +74,36 @@ Describe "Import argument construction" {
   Context "base flags are always present" {
     It "includes --stage-and-upgrade, --skip-lower-version, and --activate-plugins" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0" }
-      $args = Build-ImportArgs -ZipPath "/fake/Sol1_1.0.0.0.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/Sol1_1.0.0.0.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $args | Should -Contain "--stage-and-upgrade"
-      $args | Should -Contain "--skip-lower-version"
-      $args | Should -Contain "--activate-plugins"
+      $importArgs | Should -Contain "--stage-and-upgrade"
+      $importArgs | Should -Contain "--skip-lower-version"
+      $importArgs | Should -Contain "--activate-plugins"
     }
 
     It "does NOT include --force-overwrite" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0" }
-      $args = Build-ImportArgs -ZipPath "/fake/Sol1_1.0.0.0.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/Sol1_1.0.0.0.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $args | Should -Not -Contain "--force-overwrite"
+      $importArgs | Should -Not -Contain "--force-overwrite"
     }
 
     It "starts with 'solution' and 'import'" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0" }
-      $args = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $args[0] | Should -Be "solution"
-      $args[1] | Should -Be "import"
+      $importArgs[0] | Should -Be "solution"
+      $importArgs[1] | Should -Be "import"
     }
 
     It "includes --path with the correct zip path" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0" }
       $zipPath = "/artifact/Sol1_1.0.0.0.zip"
-      $args = Build-ImportArgs -ZipPath $zipPath -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath $zipPath -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $pathIndex = [array]::IndexOf($args, "--path")
+      $pathIndex = [array]::IndexOf($importArgs, "--path")
       $pathIndex | Should -BeGreaterThan -1
-      $args[$pathIndex + 1] | Should -Be $zipPath
+      $importArgs[$pathIndex + 1] | Should -Be $zipPath
     }
   }
 
@@ -112,48 +112,48 @@ Describe "Import argument construction" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0"; includeDeploymentSettings = $true }
       Set-Content -Path (Join-Path $script:tempDir "deploymentSettings_QA.json") -Value "{}"
 
-      $args = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $args | Should -Contain "--settings-file"
-      $settingsIndex = [array]::IndexOf($args, "--settings-file")
-      $args[$settingsIndex + 1] | Should -BeLike "*deploymentSettings_QA.json"
+      $importArgs | Should -Contain "--settings-file"
+      $settingsIndex = [array]::IndexOf($importArgs, "--settings-file")
+      $importArgs[$settingsIndex + 1] | Should -BeLike "*deploymentSettings_QA.json"
     }
 
     It "does NOT add --settings-file when includeDeploymentSettings is false" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0"; includeDeploymentSettings = $false }
       Set-Content -Path (Join-Path $script:tempDir "deploymentSettings_QA.json") -Value "{}"
 
-      $args = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $args | Should -Not -Contain "--settings-file"
+      $importArgs | Should -Not -Contain "--settings-file"
     }
 
     It "does NOT add --settings-file when includeDeploymentSettings is omitted" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0" }
       Set-Content -Path (Join-Path $script:tempDir "deploymentSettings_QA.json") -Value "{}"
 
-      $args = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $args | Should -Not -Contain "--settings-file"
+      $importArgs | Should -Not -Contain "--settings-file"
     }
 
     It "does NOT add --settings-file when file does not exist even if flag is true" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0"; includeDeploymentSettings = $true }
       # No settings file created
 
-      $args = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "QA" -ArtifactDir $script:tempDir
 
-      $args | Should -Not -Contain "--settings-file"
+      $importArgs | Should -Not -Contain "--settings-file"
     }
 
     It "uses the correct stage name in the settings file path" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0"; includeDeploymentSettings = $true }
       Set-Content -Path (Join-Path $script:tempDir "deploymentSettings_Prod.json") -Value "{}"
 
-      $args = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "Prod" -ArtifactDir $script:tempDir
+      $importArgs = Build-ImportArgs -ZipPath "/fake/path.zip" -Solution $solution -StageName "Prod" -ArtifactDir $script:tempDir
 
-      $settingsIndex = [array]::IndexOf($args, "--settings-file")
-      $args[$settingsIndex + 1] | Should -BeLike "*deploymentSettings_Prod.json"
+      $settingsIndex = [array]::IndexOf($importArgs, "--settings-file")
+      $importArgs[$settingsIndex + 1] | Should -BeLike "*deploymentSettings_Prod.json"
     }
   }
 
@@ -162,12 +162,12 @@ Describe "Import argument construction" {
       $repoRoot = Join-Path $script:tempDir "repo"
       New-Item -ItemType Directory -Path (Join-Path $repoRoot "deploymentSettings") -Force | Out-Null
 
-      $args = Build-SingleSolutionImportArgs -ZipPath "/fake/path.zip" -StageName "QA" -RepoRoot $repoRoot
+      $importArgs = Build-SingleSolutionImportArgs -ZipPath "/fake/path.zip" -StageName "QA" -RepoRoot $repoRoot
 
-      $args | Should -Contain "--stage-and-upgrade"
-      $args | Should -Contain "--skip-lower-version"
-      $args | Should -Contain "--activate-plugins"
-      $args | Should -Not -Contain "--force-overwrite"
+      $importArgs | Should -Contain "--stage-and-upgrade"
+      $importArgs | Should -Contain "--skip-lower-version"
+      $importArgs | Should -Contain "--activate-plugins"
+      $importArgs | Should -Not -Contain "--force-overwrite"
     }
 
     It "adds --settings-file when repo deployment settings exist" {
@@ -176,18 +176,18 @@ Describe "Import argument construction" {
       New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
       Set-Content -Path (Join-Path $settingsDir "deploymentSettings_Stage.json") -Value "{}"
 
-      $args = Build-SingleSolutionImportArgs -ZipPath "/fake/path.zip" -StageName "Stage" -RepoRoot $repoRoot
+      $importArgs = Build-SingleSolutionImportArgs -ZipPath "/fake/path.zip" -StageName "Stage" -RepoRoot $repoRoot
 
-      $args | Should -Contain "--settings-file"
+      $importArgs | Should -Contain "--settings-file"
     }
 
     It "omits --settings-file when repo deployment settings do not exist" {
       $repoRoot = Join-Path $script:tempDir "repo"
       New-Item -ItemType Directory -Path $repoRoot -Force | Out-Null
 
-      $args = Build-SingleSolutionImportArgs -ZipPath "/fake/path.zip" -StageName "Stage" -RepoRoot $repoRoot
+      $importArgs = Build-SingleSolutionImportArgs -ZipPath "/fake/path.zip" -StageName "Stage" -RepoRoot $repoRoot
 
-      $args | Should -Not -Contain "--settings-file"
+      $importArgs | Should -Not -Contain "--settings-file"
     }
   }
 }
