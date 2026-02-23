@@ -1,5 +1,6 @@
 Describe "build.json validation" {
 
+  BeforeAll {
   # Helper: writes a build.json and returns the path
   function New-BuildJson {
     param([object]$Content)
@@ -42,6 +43,7 @@ Describe "build.json validation" {
       SettingsCount = $settingsCount
     }
   }
+  } # end BeforeAll
 
   AfterEach {
     if ($script:buildJsonPath) {

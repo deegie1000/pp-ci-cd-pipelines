@@ -1,5 +1,6 @@
 Describe "Artifact validation" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: mirrors the upfront artifact validation logic from
   # deploy-environment.yml. Validates that all required zip files and
@@ -43,6 +44,7 @@ Describe "Artifact validation" {
       MissingCount     = $missingArtifacts.Count
     }
   }
+  } # end BeforeAll
 
   BeforeEach {
     $script:artifactDir = Join-Path ([System.IO.Path]::GetTempPath()) "artifact_$([guid]::NewGuid().ToString('N'))"

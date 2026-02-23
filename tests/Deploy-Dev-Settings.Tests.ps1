@@ -1,5 +1,6 @@
 Describe "Deploy-to-Dev deployment settings resolution" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: mirrors the logic from deploy-solution.yml Dev stage
   # that resolves whether a deployment settings file exists.
@@ -22,6 +23,7 @@ Describe "Deploy-to-Dev deployment settings resolution" {
       SettingsPath          = $settingsPath
     }
   }
+  } # end BeforeAll
 
   BeforeEach {
     $script:tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "deploy_$([guid]::NewGuid().ToString('N'))"
@@ -72,6 +74,7 @@ Describe "Deploy-to-Dev deployment settings resolution" {
 
 Describe "Pre-Dev artifact staging" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: mirrors the logic from export-solution-predev.yml Step 8
   # that stages the managed zip and deployment settings for the artifact.
@@ -99,6 +102,7 @@ Describe "Pre-Dev artifact staging" {
 
     return $stagedFiles
   }
+  } # end BeforeAll
 
   BeforeEach {
     $script:tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "predev_$([guid]::NewGuid().ToString('N'))"

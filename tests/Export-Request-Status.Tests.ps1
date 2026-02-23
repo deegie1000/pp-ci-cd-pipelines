@@ -1,5 +1,6 @@
 Describe "Export request status transitions" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Status choice values (mirrors pipeline variables)
   # -----------------------------------------------------------------------
@@ -176,6 +177,7 @@ Describe "Export request status transitions" {
       Fields     = $update
     }
   }
+  } # end BeforeAll
 
   Context "export pipeline status transitions" {
     It "transitions Queued to InProgress to Completed on success" {

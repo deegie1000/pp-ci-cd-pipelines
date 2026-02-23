@@ -1,5 +1,6 @@
 Describe "Deploy ordering and failure isolation" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: simulates the deploy loop from deploy-environment.yml.
   # Takes solutions, installed versions, and a set of solutions that will
@@ -51,6 +52,7 @@ Describe "Deploy ordering and failure isolation" {
       HasFailures = ($failedSolutions.Count -gt 0)
     }
   }
+  } # end BeforeAll
 
   Context "deploy order matches build.json order" {
     It "deploys solutions in the exact order specified in build.json" {

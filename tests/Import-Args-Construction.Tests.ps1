@@ -1,5 +1,6 @@
 Describe "Import argument construction" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: mirrors the import-args logic from deploy-environment.yml.
   # Builds the pac CLI argument array for a given solution entry.
@@ -61,6 +62,7 @@ Describe "Import argument construction" {
 
     return $importArgs
   }
+  } # end BeforeAll
 
   BeforeEach {
     $script:tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "importargs_$([guid]::NewGuid().ToString('N'))"

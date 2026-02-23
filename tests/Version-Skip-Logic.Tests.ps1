@@ -1,5 +1,6 @@
 Describe "Version skip logic" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: mirrors the version-check logic from deploy-environment.yml.
   # Given a solution entry and a hashtable of installed solutions, returns
@@ -66,6 +67,7 @@ Describe "Version skip logic" {
       Skipped  = $skipped
     }
   }
+  } # end BeforeAll
 
   Context "single solution decisions" {
     It "skips when installed version matches target version exactly" {

@@ -1,5 +1,6 @@
 Describe "Cloud flow detection" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: mirrors the detection logic used by the export pipeline.
   # Given an unpacked solution root folder, returns $true if cloud flows
@@ -50,6 +51,7 @@ Describe "Cloud flow detection" {
 
     return $solutionDir
   }
+  } # end BeforeAll
 
   AfterEach {
     if ($script:solutionDir) {

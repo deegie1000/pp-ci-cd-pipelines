@@ -1,5 +1,6 @@
 Describe "configData validation in build.json" {
 
+  BeforeAll {
   # Helper: writes a build.json and returns the path
   function New-BuildJson {
     param([object]$Content)
@@ -46,6 +47,7 @@ Describe "configData validation in build.json" {
 
     return $result
   }
+  } # end BeforeAll
 
   AfterEach {
     if ($script:buildJsonPath) {

@@ -1,5 +1,6 @@
 Describe "Patch solution detection" {
 
+  BeforeAll {
   # -----------------------------------------------------------------------
   # Helper: mirrors the patch detection logic from export-solutions.yml.
   # Reads Solution.xml and determines if the solution is a patch.
@@ -99,6 +100,7 @@ Describe "Patch solution detection" {
     Set-Content -Path $xmlPath -Value $xml -Encoding UTF8
     return $xmlPath
   }
+  } # end BeforeAll
 
   BeforeEach {
     $script:tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "patch_$([guid]::NewGuid().ToString('N'))"
@@ -231,6 +233,7 @@ Describe "Patch solution detection" {
   }
 
   Context "post-export version management decision" {
+    BeforeAll {
     # -----------------------------------------------------------------------
     # Helper: mirrors the post-export version management decision from
     # export-solutions.yml. Determines whether to bump version directly
@@ -264,6 +267,7 @@ Describe "Patch solution detection" {
         }
       }
     }
+    } # end BeforeAll
 
     It "returns BumpVersion for non-patch solutions" {
       $solution = [PSCustomObject]@{ name = "Sol1"; version = "1.0.0.0" }
