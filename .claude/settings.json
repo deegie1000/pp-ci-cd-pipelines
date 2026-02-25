@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/FrankShin/.claude/projects/c--Users-FrankShin-source-repos-pp-ci-cd-pp-ci-cd-pipelines/memory/**)"
+    ]
+  }
+}

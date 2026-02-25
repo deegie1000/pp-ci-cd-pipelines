@@ -444,9 +444,9 @@ steps:
       $buildConfig   = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
       $updatedConfig = @{ solutions = @($solutions) }
 
-      # Preserve postExportVersion if it exists in the original config
-      if ($buildConfig.PSObject.Properties["postExportVersion"] -and $buildConfig.postExportVersion) {
-        $updatedConfig["postExportVersion"] = $buildConfig.postExportVersion
+      # Preserve configData if it exists in the original config
+      if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData) {
+        $updatedConfig["configData"] = $buildConfig.configData
       }
 
       $updatedConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
@@ -491,7 +491,7 @@ steps:
       $solutionsJson = @($solutions) | ConvertTo-Json -Compress
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
 
-      # Pass configData and postExportVersion forward for downstream steps
+      # Pass configData forward for the Extract config data step
       if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData.Count -gt 0) {
         $configDataJson = @($buildConfig.configData) | ConvertTo-Json -Compress -Depth 10
         Write-Host "##vso[task.setvariable variable=ConfigDataList]$configDataJson"
@@ -583,27 +583,23 @@ steps:
       $sourceDir = "$(Build.SourcesDirectory)"
       $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
       $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+      $solutions = @($buildConfig.solutions)
 
-      # Check for postExportVersion
-      if (-not $buildConfig.PSObject.Properties["postExportVersion"] -or -not $buildConfig.postExportVersion) {
-        Write-Host "No postExportVersion in build.json. Skipping version management."
+      # Check whether any solution has postExportVersion defined
+      $managed = @($solutions | Where-Object { $_.PSObject.Properties["postExportVersion"] -and $_.postExportVersion })
+      if ($managed.Count -eq 0) {
+        Write-Host "No solutions have postExportVersion defined. Skipping version management."
         exit 0
       }
-
-      $postVersion = $buildConfig.postExportVersion
-      $solutions = @($buildConfig.solutions)
-      $prefix = "$(PatchDisplayNamePrefix)"
 
       Write-Host "============================================"
       Write-Host "  Post-Export Version Management"
       Write-Host "============================================"
-      Write-Host "Target version:   $postVersion"
-      Write-Host "Patch prefix:     '$prefix'"
-      Write-Host "Solutions:        $($solutions.Count)"
+      Write-Host "Solutions with postExportVersion: $($managed.Count)"
       Write-Host ""
 
       # ---------------------------------------------------------------
-      # Acquire OAuth token for Dataverse API (needed for patch ops)
+      # Acquire OAuth token for Dataverse API (needed for CloneAsPatch)
       # ---------------------------------------------------------------
       $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
       $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
@@ -625,72 +621,57 @@ steps:
       Write-Host "Authenticated with Dataverse API."
 
       # ---------------------------------------------------------------
-      # Process each solution
+      # Process each solution that has postExportVersion
       # ---------------------------------------------------------------
       $failedUpdates = @()
 
       foreach ($solution in $solutions) {
         $name = $solution.name
 
-        $isPatch = $false
-        if ($solution.PSObject.Properties["isPatch"]) {
-          $isPatch = [bool]$solution.isPatch
+        if (-not $solution.PSObject.Properties["postExportVersion"] -or -not $solution.postExportVersion) {
+          Write-Host "Skipping '$name' — no postExportVersion defined."
+          continue
         }
 
-        if ($isPatch) {
-          # =============================================================
-          # Patch solution: rename old patch, then clone new from parent
-          # =============================================================
-          $parentName  = $solution.parentSolution
-          $displayName = $solution.displayName
+        $postVersion   = $solution.postExportVersion
+        $createNewPatch = $false
+        if ($solution.PSObject.Properties["createNewPatch"]) {
+          $createNewPatch = [bool]$solution.createNewPatch
+        }
 
-          Write-Host "--------------------------------------------"
-          Write-Host "Patch: $name (parent: $parentName)"
-          Write-Host "--------------------------------------------"
+        Write-Host "--------------------------------------------"
+        Write-Host "Solution: $name -> v$postVersion  (createNewPatch: $createNewPatch)"
+        Write-Host "--------------------------------------------"
 
-          # 1. Rename the current patch's display name to add prefix
+        if ($createNewPatch) {
+          # ===========================================================
+          # Create a new patch from this solution at postExportVersion
+          # ===========================================================
           try {
-            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname"
+            # Fetch the solution's current friendly name to use for the patch
+            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=friendlyname"
             $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
-            $solutionId = $solResult.value[0].solutionid
-            $currentDisplayName = $solResult.value[0].friendlyname
-            $newDisplayName = "${prefix}${currentDisplayName}"
+            $friendlyName = $solResult.value[0].friendlyname
 
-            Write-Host "  Renaming: '$currentDisplayName' -> '$newDisplayName'"
-            $renameBody = @{ friendlyname = $newDisplayName } | ConvertTo-Json
-            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/solutions($solutionId)" -Method Patch -Headers $apiHeaders -Body $renameBody
-            Write-Host "  Display name updated."
-          } catch {
-            Write-Error "  Failed to rename patch '$name': $($_.Exception.Message)"
-            $failedUpdates += $name
-            continue
-          }
-
-          # 2. Clone a new patch from the parent solution with the new version
-          try {
-            Write-Host "  Cloning new patch from parent '$parentName' at v$postVersion..."
+            Write-Host "  Creating new patch from '$name' (base friendly name: '$friendlyName') at v$postVersion..."
             $cloneBody = @{
-              ParentSolutionUniqueName = $parentName
-              DisplayName              = $displayName
+              ParentSolutionUniqueName = $name
+              DisplayName              = $friendlyName
               VersionNumber            = $postVersion
             } | ConvertTo-Json
 
             Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsPatch" -Method Post -Headers $apiHeaders -Body $cloneBody
-            Write-Host "  New patch cloned successfully at v$postVersion."
+            Write-Host "  New patch created successfully at v$postVersion."
           } catch {
-            Write-Error "  Failed to clone patch from '$parentName': $($_.Exception.Message)"
+            Write-Error "  Failed to create patch from '$name': $($_.Exception.Message)"
             $failedUpdates += $name
             continue
           }
 
         } else {
-          # =============================================================
-          # Non-patch solution: bump version directly
-          # =============================================================
-          Write-Host "--------------------------------------------"
-          Write-Host "Solution: $name -> v$postVersion"
-          Write-Host "--------------------------------------------"
-
+          # ===========================================================
+          # Clone (version-bump) the solution to postExportVersion
+          # ===========================================================
           pac solution online-version `
             --solution-name $name `
             --solution-version $postVersion
@@ -714,7 +695,7 @@ steps:
         exit 1
       }
 
-      Write-Host "Post-export version management complete. All solutions updated to v$postVersion."
+      Write-Host "Post-export version management complete."
     displayName: "Post-export version management"
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
     env:

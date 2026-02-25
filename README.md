@@ -48,7 +48,7 @@ pp-ci-cd-pipelines/
 
 | # | Pipeline | Trigger | Purpose |
 |---|----------|---------|---------|
-| 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET daily) | Export from Dev, validate versions, pack managed, PR to main |
+| 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET daily) | Export from Dev, validate versions, export managed, PR to main |
 | 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod |
 | 3 | [Export from Pre-Dev](#3-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
 | 4 | [Deploy Solution](#4-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution through Dev &rarr; QA &rarr; Stage &rarr; Prod |
@@ -59,7 +59,7 @@ pp-ci-cd-pipelines/
 
 ### 1. Daily Export Solutions (`pipelines/export-solutions.yml`)
 
-Exports solutions from the Power Platform **Dev** environment on a daily schedule, validates their versions against `build.json`, unpacks them into source control, converts them to managed packages, and creates a PR to merge into `main`. Optionally bumps solution versions in Dev after export to prepare for the next development cycle.
+Exports solutions from the Power Platform **Dev** environment on a daily schedule, validates their versions against `build.json`, unpacks them into source control, exports managed solutions directly from Power Platform, and creates a PR to merge into `main`. Optionally bumps solution versions in Dev after export to prepare for the next development cycle.
 
 **What it does:**
 
@@ -71,11 +71,10 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
    - **Detects cloud flows**: checks for `.json` files in the unpacked `Workflows/` directory. If found, sets `includesCloudFlows: true` on the solution entry in `build.json`
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
-   - **Detects patches**: reads `Other/Solution.xml` for a `<ParentSolution>` element. If found, sets `isPatch: true`, `parentSolution`, and `displayName` on the solution entry in `build.json`
-   - Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/`
-4. Writes the updated `build.json` (with auto-detected flags like `includesCloudFlows`, `isPatch`, `parentSolution`, `displayName`) and publishes it along with managed zips, config data files, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
+   - Exports the **managed** solution directly from Power Platform &rarr; `solutions/managed/`
+4. Writes the updated `build.json` (with the auto-detected `includesCloudFlows` flag) and publishes it along with managed zips, config data files, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
 5. **Extracts configuration data** &mdash; if `configData` is defined in `build.json`, queries each data set from Dev using OData `$select`/`$filter`, writes the results as JSON to `configData/`, and includes them in the artifact. See [Configuration Data](#configuration-data) for details.
-6. **Post-export version management** &mdash; if `postExportVersion` is set in `build.json`, bumps all solution versions in the Dev environment after export. Non-patch solutions get a direct version update via `pac solution online-version`; patch solutions have their display name prefixed (configurable via `PatchDisplayNamePrefix` variable, default `(DO NOT USE) `) and a new patch is cloned from the parent at the new version via the Dataverse `CloneAsPatch` action. See [Post-Export Version Management](#post-export-version-management) for details.
+6. **Post-export version management** &mdash; for each solution that has a `postExportVersion` defined in `build.json`, bumps that solution's version in the Dev environment after export. Solutions with `createNewPatch: true` have a new patch cloned from themselves at the new version via the Dataverse `CloneAsPatch` action; solutions with `createNewPatch: false` (or unset) get a direct version update via `pac solution online-version`. See [Post-Export Version Management](#post-export-version-management) for details.
 7. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
 8. Commits solution files, config data, and merged deployment settings, then pushes to the export branch
 9. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
@@ -116,9 +115,8 @@ Deploys managed solutions through three environments in sequence: **QA &rarr; St
 4. Queries all installed solutions in the target environment using `pac solution list`
 5. For each solution in `build.json` (in order):
    - **Skip** &mdash; if the solution is already installed at the target version
-   - **Fresh install** &mdash; if the solution doesn't exist in the target environment
-   - **Upgrade** &mdash; if the solution exists but at a different version
-   - Imports as managed with `--stage-and-upgrade --skip-lower-version --activate-plugins`
+   - **Fresh install** &mdash; if the solution doesn't exist in the target environment: imports with `--activate-plugins`
+   - **Upgrade** &mdash; if the solution exists but at a different version: imports with `--stage-and-upgrade --skip-lower-version --activate-plugins`
    - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
    - If the solution has `includesCloudFlows: true`, checks for inactive cloud flows after import and attempts to activate them. Activation failures are logged as **warnings** but do not fail the deployment
 6. **Upserts configuration data** &mdash; if `configData` is defined in `build.json`, PATCHes each record into the target environment using stable GUIDs. Record-level failures are logged as **warnings** but do not fail the deployment. See [Configuration Data](#configuration-data)
@@ -216,7 +214,7 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │  2. Read build.json      │    │  │   QA    │  │  Stage  │  │    Prod    │ │
 │  3. Export from Dev      │    │  │  (auto) │─►│(manual) │─►│  (manual)  │ │
 │  4. Validate versions    │───►│  │         │  │         │  │            │ │
-│  5. Unpack + pack managed│    │  └─────────┘  └─────────┘  └────────────┘ │
+│  5. Unpack + export managed│  │  └─────────┘  └─────────┘  └────────────┘ │
 │  6. Publish artifact     │    │                                             │
 │  7. Post-export versions │    │  Each stage:                                │
 │  8. Merge deploy settings│    │  - Validates all artifacts upfront           │
@@ -282,10 +280,9 @@ The `build.json` file defines which solutions to export and their **expected ver
 
 ```json
 {
-  "postExportVersion": "2.0.0.0",
   "solutions": [
-    { "name": "CoreComponents", "version": "1.2.0.0" },
-    { "name": "CustomConnectors", "version": "1.0.3.0" },
+    { "name": "CoreComponents", "version": "1.2.0.0", "postExportVersion": "1.3.0.0", "createNewPatch": true },
+    { "name": "CustomConnectors", "version": "1.0.3.0", "postExportVersion": "1.0.4.0", "createNewPatch": false },
     { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
   ],
   "configData": [
@@ -305,15 +302,13 @@ The `build.json` file defines which solutions to export and their **expected ver
 
 | Field | Description |
 |---|---|
-| `postExportVersion` | Optional root-level string. If set, the export pipeline bumps all solutions in Dev to this version after export. Non-patch solutions get a direct version update; patch solutions are cloned from the parent at this version (see [Post-Export Version Management](#post-export-version-management)). |
 | `solutions` | Ordered array of solutions to export. Order matters &mdash; the release pipeline deploys in this order (put dependencies first). |
 | `solutions[].name` | The solution's **unique name** as it appears in Power Platform (not the display name). |
 | `solutions[].version` | The **exact version** expected in the Dev environment. Must match the version in Dev's `Solution.xml`, or the export pipeline will fail. |
 | `solutions[].includeDeploymentSettings` | Optional boolean (default: `false`). If `true`, the release pipeline will apply a deployment settings file (`deploymentSettings_{stage}.json`) when importing this solution. Only one solution should have this set to `true`. |
+| `solutions[].postExportVersion` | Optional string. If set, the export pipeline bumps this solution's version in Dev to the specified version after export. See [Post-Export Version Management](#post-export-version-management). |
+| `solutions[].createNewPatch` | Optional boolean (default: `false`). Only used when `postExportVersion` is set. If `true`, a new patch is cloned from this solution at `postExportVersion` via the Dataverse `CloneAsPatch` action. If `false`, the solution's version is updated directly via `pac solution online-version`. |
 | `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
-| `solutions[].isPatch` | **Auto-detected** boolean. Set to `true` if the unpacked `Solution.xml` contains a `<ParentSolution>` element. Do not set this manually. |
-| `solutions[].parentSolution` | **Auto-detected** string. The unique name of the parent solution (only set when `isPatch` is `true`). |
-| `solutions[].displayName` | **Auto-detected** string. The solution's localized display name (only set when `isPatch` is `true`). |
 
 ### Config Data Fields
 
@@ -439,45 +434,34 @@ After the merge, the root file becomes:
 
 ### Post-Export Version Management
 
-If `build.json` includes a root-level `postExportVersion` property, the export pipeline automatically bumps solution versions in the Dev environment **after** exporting and publishing artifacts. This prepares Dev for the next development cycle.
+If a solution entry in `build.json` includes a `postExportVersion` property, the export pipeline automatically bumps that solution's version in the Dev environment **after** exporting and publishing artifacts. This prepares Dev for the next development cycle. Solutions without `postExportVersion` are left untouched.
 
 **How it works:**
 
-| Solution Type | Action |
+| `createNewPatch` | Action |
 |---|---|
-| **Non-patch** | Calls `pac solution online-version` to set the solution's version to `postExportVersion` directly |
-| **Patch** | 1. Renames the current patch's display name to add a prefix (e.g., `(DO NOT USE) My Patch`). 2. Calls the Dataverse `CloneAsPatch` action to create a new patch from the parent solution at `postExportVersion`. The new patch inherits the original display name. |
-
-**Patch detection:** The pipeline reads each solution's `Other/Solution.xml` after unpacking. If a `<ParentSolution>` element exists, the solution is identified as a patch. The parent solution's unique name and the patch's display name are stored on the `build.json` solution entry.
-
-**Configuring the patch prefix:**
-
-The `PatchDisplayNamePrefix` variable controls the text prepended to old patch display names. It defaults to `(DO NOT USE) ` and can be overridden in the ADO pipeline variables:
-
-```yaml
-variables:
-  - name: PatchDisplayNamePrefix
-    value: "(DO NOT USE) "      # Change this to customize the prefix
-```
+| `false` (or omitted) | Calls `pac solution online-version` to set the solution's version to `postExportVersion` directly |
+| `true` | Calls the Dataverse `CloneAsPatch` action to create a new patch from this solution at `postExportVersion`. The solution itself serves as the parent. |
 
 **Example:**
 
 Given `build.json`:
 ```json
 {
-  "postExportVersion": "2.0.0.0",
   "solutions": [
-    { "name": "CoreComponents", "version": "1.5.0.0" },
-    { "name": "CorePatch", "version": "1.5.0.1" }
+    { "name": "CoreComponents", "version": "1.2.0.0", "postExportVersion": "1.3.0.0", "createNewPatch": true },
+    { "name": "CustomConnectors", "version": "1.0.3.0", "postExportVersion": "1.0.4.0", "createNewPatch": false },
+    { "name": "MainApp", "version": "2.1.0.0" }
   ]
 }
 ```
 
-If `CorePatch` is detected as a patch of `CoreComponents`:
-1. `CoreComponents` &rarr; version bumped to `2.0.0.0`
-2. `CorePatch` &rarr; display name changed to `(DO NOT USE) CorePatch`, then a new patch of `CoreComponents` is cloned at `2.0.0.0`
+After export:
+1. `CoreComponents` &rarr; a new patch is cloned from `CoreComponents` at version `1.3.0.0`
+2. `CustomConnectors` &rarr; version updated directly to `1.0.4.0`
+3. `MainApp` &rarr; no change (no `postExportVersion`)
 
-If `postExportVersion` is omitted from `build.json`, this step is skipped entirely.
+If no solutions in `build.json` have `postExportVersion`, this step is skipped entirely.
 
 ### Configuration Data
 
@@ -577,6 +561,7 @@ Invoke-Pester tests/ -Output Detailed
 |---|---|
 | **Azure DevOps Organization** | Any ADO org with Pipelines enabled |
 | **Power Platform Build Tools** | Install the [Power Platform Build Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.PowerPlatform-BuildTools) extension from the Visual Studio Marketplace into your ADO organization |
+| **pac CLI (Power Platform CLI)** | Installed automatically at runtime via `dotnet tool install --global Microsoft.PowerApps.CLI.Tool`. No pre-installation required; Microsoft-hosted agents include the .NET SDK. |
 | **App Registration (Service Principal)** | An Entra ID app registration with client secret, granted **System Administrator** or **System Customizer** role in the target Power Platform environments |
 | **Agent Pool** | Uses `windows-latest` Microsoft-hosted agents (no self-hosted agent required) |
 
