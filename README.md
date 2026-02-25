@@ -750,6 +750,7 @@ The pipeline's build service identity needs permissions to push commits and crea
 4. Set the following permissions to **Allow**:
    - **Contribute**
    - **Create branch**
+   - **Force push (rewrite history, delete branches)** (for the daily export pipeline — required to delete the export branch after merge)
    - **Create pull requests** (for the daily export pipeline)
    - **Contribute to pull requests** (for the daily export pipeline)
 
@@ -900,6 +901,7 @@ Common examples:
 | "Failed to authenticate with Power Platform" | Secret variables are missing or incorrect | Verify `ClientId`, `ClientSecret`, and `TenantId` in pipeline variables |
 | "Failed to export solution" | Solution name doesn't match, or SPN lacks permissions | Verify the solution unique name in Power Platform and the app user's security role |
 | "Failed to create Pull Request" | Build service lacks repo permissions | Grant Contribute and Create PR permissions (see Step 9) |
+| "Could not delete source branch" warning after PR merge | Build service lacks Force push permission | Grant **Force push (rewrite history, delete branches)** to the Build Service account on the repository (see Step 9) |
 | PR created but not auto-completing | Branch policies require human reviewers | Either add an exception for the build service or manually complete the PR |
 | Root `deploymentSettings/` not updated | No `deploymentSettings_*.json` files in the export folder | The merge step only runs when settings files exist in `exports/{date-token}/`. If you need deployment settings, add them to the export folder before the pipeline runs |
 | Export overwrote a value I didn't expect | Export items overwrite matching root items by key | The merge uses `SchemaName` (env variables) and `LogicalName` (connection references) to match. If an export file contains an item with the same key as the root, the export value wins. Review the diff in the PR before merging to `main` |

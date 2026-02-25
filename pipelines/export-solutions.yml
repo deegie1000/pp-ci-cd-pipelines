@@ -649,20 +649,25 @@ steps:
           # If this solution is itself a patch, Dataverse requires the
           # parent (base) solution as ParentSolutionUniqueName — you
           # cannot create a patch from a patch.
+          #
+          # Query Dataverse directly to determine the parent rather than
+          # relying on build.json flags, which may not be set on re-runs.
           # ===========================================================
           try {
-            # Resolve the correct parent for CloneAsPatch
-            $parentUniqueName = $name
-            if ($solution.PSObject.Properties["isPatch"] -and [bool]$solution.isPatch -and
-                $solution.PSObject.Properties["parentSolution"] -and $solution.parentSolution) {
-              $parentUniqueName = $solution.parentSolution
-              Write-Host "  '$name' is a patch — using parent '$parentUniqueName' as CloneAsPatch source."
-            }
-
-            # Fetch this solution's friendly name to use as the display name of the new patch
-            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=friendlyname"
+            # Query this solution's friendly name and parent (if any) in one call
+            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=friendlyname&`$expand=parentsolutionid(`$select=uniquename)"
             $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
-            $friendlyName = $solResult.value[0].friendlyname
+            $solRecord  = $solResult.value[0]
+            $friendlyName = $solRecord.friendlyname
+
+            # If Dataverse returns a parent solution, this is itself a patch —
+            # CloneAsPatch must use the base solution, not this patch.
+            if ($solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename) {
+              $parentUniqueName = $solRecord.parentsolutionid.uniquename
+              Write-Host "  '$name' is a patch — using parent '$parentUniqueName' as CloneAsPatch source."
+            } else {
+              $parentUniqueName = $name
+            }
 
             Write-Host "  Creating new patch from '$parentUniqueName' (display name: '$friendlyName') at v$postVersion..."
             $cloneBody = @{
