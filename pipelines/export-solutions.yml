@@ -803,27 +803,25 @@ steps:
       # -----------------------------------------------------------------
       # Create the Pull Request
       # -----------------------------------------------------------------
+      $description = (
+        "## Automated Solution Export`n`n" +
+        "**Branch:** ``$(ExportBranch)```n" +
+        "**Date:** $(ExportSubfolder)`n`n" +
+        "### Solutions Exported`n" +
+        "$solutionBullets`n`n" +
+        "### Contents`n" +
+        "- ``solutions/unmanaged/`` - Unmanaged solution zip files`n" +
+        "- ``solutions/unpacked/``  - Unpacked solution source (clean unpack)`n" +
+        "- ``solutions/managed/``   - Managed solution zip files`n`n" +
+        "---`n" +
+        "*This PR was created automatically by the export-solutions pipeline.*"
+      )
+
       $prBody = @{
         sourceRefName = "refs/heads/$(ExportBranch)"
         targetRefName = "refs/heads/main"
         title         = "Export Power Platform Solutions - $(ExportSubfolder)"
-        description   = @"
-## Automated Solution Export
-
-**Branch:** ``$(ExportBranch)``
-**Date:** $(ExportSubfolder)
-
-### Solutions Exported
-$solutionBullets
-
-### Contents
-- ``solutions/unmanaged/`` - Unmanaged solution zip files
-- ``solutions/unpacked/``  - Unpacked solution source (clean unpack)
-- ``solutions/managed/``   - Managed solution zip files
-
----
-*This PR was created automatically by the export-solutions pipeline.*
-"@
+        description   = $description
       } | ConvertTo-Json -Depth 5
 
       $createUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests?api-version=7.1"
