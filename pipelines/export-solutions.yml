@@ -91,7 +91,13 @@ steps:
     displayName: "Install Power Platform Build Tools"
 
   # ===========================================================================
-  # Step 3: Detect export branch for today's date
+  # Step 3: Install pac CLI
+  # ===========================================================================
+  - pwsh: dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+    displayName: "Install pac CLI"
+
+  # ===========================================================================
+  # Step 4: Detect export branch for today's date
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -153,7 +159,7 @@ steps:
     displayName: "Detect export branch"
 
   # ===========================================================================
-  # Step 4: Checkout the export branch
+  # Step 5: Checkout the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -167,10 +173,10 @@ steps:
 
       Write-Host "Successfully checked out $(ExportBranch)"
     displayName: "Checkout export branch"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 5: Read build.json and extract solutions list
+  # Step 6: Read build.json and extract solutions list
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -200,10 +206,10 @@ steps:
       $solutionsJson = @($solutions) | ConvertTo-Json -Compress
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
     displayName: "Read build.json configuration"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 6: Authenticate pac CLI with Power Platform
+  # Step 7: Authenticate pac CLI with Power Platform
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -224,17 +230,17 @@ steps:
       Write-Host "Successfully authenticated with Power Platform"
       pac auth list
     displayName: "Authenticate with Power Platform"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
     env:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 7: Export solutions (unmanaged), clean unpack, and pack as managed
+  # Step 8: Export solutions (unmanaged), clean unpack, and pack as managed
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      $solutions = @("$(SolutionsList)" | ConvertFrom-Json)
+      $solutions = @($env:SolutionsList | ConvertFrom-Json)
       $sourceDir = "$(Build.SourcesDirectory)"
 
       # Ensure output directories exist
@@ -498,20 +504,20 @@ steps:
 
       Write-Host "All solutions processed successfully."
     displayName: "Export, unpack, and pack solutions"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 8: Extract configuration data from Dev (if configData defined)
+  # Step 9: Extract configuration data from Dev (if configData defined)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      if ("$(HasConfigData)" -ne "true") {
+      if ($env:HasConfigData -ne "true") {
         Write-Host "No configData in build.json — skipping extraction."
         exit 0
       }
 
-      $configData = @("$(ConfigDataList)" | ConvertFrom-Json)
+      $configData = @($env:ConfigDataList | ConvertFrom-Json)
       $sourceDir = "$(Build.SourcesDirectory)"
       $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
 
@@ -554,22 +560,22 @@ steps:
         }
       }
     displayName: "Extract config data from Dev"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
     env:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 9: Publish managed solutions and build.json as pipeline artifact
+  # Step 10: Publish managed solutions and build.json as pipeline artifact
   # ===========================================================================
   - task: PublishPipelineArtifact@1
     displayName: "Publish managed solution artifacts"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
     inputs:
       targetPath: $(Build.ArtifactStagingDirectory)
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 10: Post-export version management (bump versions in Dev)
+  # Step 11: Post-export version management (bump versions in Dev)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -710,12 +716,12 @@ steps:
 
       Write-Host "Post-export version management complete. All solutions updated to v$postVersion."
     displayName: "Post-export version management"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
     env:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 11: Merge export deployment settings into root
+  # Step 12: Merge export deployment settings into root
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -734,10 +740,10 @@ steps:
 
       & $mergeScript -ExportFolder $exportFolder -RootFolder $rootFolder
     displayName: "Merge deployment settings into root"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 12: Commit and push changes to the export branch
+  # Step 13: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -778,10 +784,10 @@ steps:
 
       Write-Host "Changes committed and pushed to $(ExportBranch)"
     displayName: "Commit and push solution files"
-    condition: eq(variables['ExportBranchFound'], 'true')
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 13: Create a Pull Request and auto-complete (merge) into main
+  # Step 14: Create a Pull Request and auto-complete (merge) into main
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -797,7 +803,7 @@ steps:
       }
 
       # Build solution list for PR description
-      $solutions = @("$(SolutionsList)" | ConvertFrom-Json)
+      $solutions = @($env:SolutionsList | ConvertFrom-Json)
       $solutionBullets = ($solutions | ForEach-Object { "- $($_.name) (v$($_.version))" }) -join "`n"
 
       # -----------------------------------------------------------------
@@ -903,6 +909,6 @@ steps:
 
       Write-Host "`nPull Request processing complete."
     displayName: "Create and merge Pull Request"
-    condition: and(eq(variables['ExportBranchFound'], 'true'), eq(variables['HasChanges'], 'true'))
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'), eq(variables['HasChanges'], 'true'))
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
