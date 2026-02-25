@@ -52,6 +52,12 @@ stages:
                   displayName: "Install Power Platform Build Tools"
 
                 # ===============================================================
+                # Install pac CLI
+                # ===============================================================
+                - pwsh: dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+                  displayName: "Install pac CLI"
+
+                # ===============================================================
                 # Authenticate pac CLI with target environment
                 # ===============================================================
                 - pwsh: |
