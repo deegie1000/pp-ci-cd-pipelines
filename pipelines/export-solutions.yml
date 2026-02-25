@@ -421,8 +421,7 @@ steps:
         pac solution pack `
           --zipfile $managedZip `
           --folder $solutionUnpackDir `
-          --type Managed `
-          --processCanvasApps
+          --packagetype Managed
 
         if ($LASTEXITCODE -ne 0) {
           Write-Error "Failed to pack managed solution: $name"
