@@ -167,7 +167,8 @@ stages:
                     # Query installed solutions from the target environment
                     # -----------------------------------------------------------
                     Write-Host "`nQuerying installed solutions in target environment..."
-                    $listJson = pac solution list --json 2>&1 | Out-String
+                    # Capture only stdout so stderr warnings don't corrupt the JSON
+                    $listJson = (pac solution list --json) | Out-String
 
                     if ($LASTEXITCODE -ne 0) {
                       Write-Error "Failed to list solutions in target environment"
@@ -176,9 +177,18 @@ stages:
                     }
 
                     $installedList = @($listJson | ConvertFrom-Json)
+                    if ($installedList.Count -gt 0) {
+                      Write-Host "DEBUG: solution list entry sample: $($installedList[0] | ConvertTo-Json -Compress)"
+                    }
+
                     $installed = @{}
                     foreach ($s in $installedList) {
-                      $installed[$s.uniqueName] = $s.version
+                      # pac v2 uses 'solutionUniqueName'; fall back to 'uniqueName' for older versions
+                      $key = if ($s.PSObject.Properties['solutionUniqueName']) { $s.solutionUniqueName }
+                             else { $s.uniqueName }
+                      $ver = if ($s.PSObject.Properties['version']) { $s.version }
+                             else { $s.versionNumber }
+                      if ($key) { $installed[$key] = $ver }
                     }
 
                     Write-Host "Found $($installed.Count) solutions in target environment."
