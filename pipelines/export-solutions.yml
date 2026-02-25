@@ -908,6 +908,33 @@ steps:
         Write-Host "The PR has been set to auto-complete and will merge once all policies are met."
       }
 
+      # -----------------------------------------------------------------
+      # Explicitly delete the source branch via refs API
+      # (completionOptions.deleteSourceBranch is unreliable in some ADO versions)
+      # -----------------------------------------------------------------
+      Write-Host "`nDeleting source branch: $(ExportBranch)..."
+
+      try {
+        $refsUrl    = "${orgUrl}${project}/_apis/git/repositories/${repoId}/refs?filter=heads/$(ExportBranch)&api-version=7.1"
+        $branchRef  = Invoke-RestMethod -Uri $refsUrl -Method Get -Headers $headers
+        if ($branchRef.value -and $branchRef.value.Count -gt 0) {
+          $deleteBody = @(
+            @{
+              name        = "refs/heads/$(ExportBranch)"
+              oldObjectId = $branchRef.value[0].objectId
+              newObjectId = "0000000000000000000000000000000000000000"
+            }
+          ) | ConvertTo-Json
+          Invoke-RestMethod -Uri "${orgUrl}${project}/_apis/git/repositories/${repoId}/refs?api-version=7.1" `
+            -Method Post -Headers $headers -Body $deleteBody | Out-Null
+          Write-Host "Source branch deleted: $(ExportBranch)"
+        } else {
+          Write-Host "Branch not found (may have already been deleted): $(ExportBranch)"
+        }
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not delete source branch $(ExportBranch): $_"
+      }
+
       Write-Host "`nPull Request processing complete."
     displayName: "Create and merge Pull Request"
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'), eq(variables['HasChanges'], 'true'))
