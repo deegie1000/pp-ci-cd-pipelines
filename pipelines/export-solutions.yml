@@ -441,6 +441,7 @@ steps:
       # Write updated build.json (with includesCloudFlows flags) and stage
       # -----------------------------------------------------------------
       $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
+      $buildConfig   = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
       $updatedConfig = @{ solutions = @($solutions) }
 
       # Preserve postExportVersion if it exists in the original config
@@ -502,7 +503,7 @@ steps:
       }
 
       Write-Host "All solutions processed successfully."
-    displayName: "Export, unpack, and pack solutions"
+    displayName: "Export and unpack solutions"
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
