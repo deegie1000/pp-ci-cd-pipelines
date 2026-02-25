@@ -441,7 +441,7 @@ If a solution entry in `build.json` includes a `postExportVersion` property, the
 | `createNewPatch` | Action |
 |---|---|
 | `false` (or omitted) | Calls `pac solution online-version` to set the solution's version to `postExportVersion` directly |
-| `true` | Calls the Dataverse `CloneAsPatch` action to create a new patch from this solution at `postExportVersion`. The solution itself serves as the parent. |
+| `true` | Calls the Dataverse `CloneAsPatch` action to create a new patch at `postExportVersion`. If the solution is itself a patch, the new patch is cloned from its **parent** (base) solution — Dataverse does not allow creating a patch from a patch. |
 
 **Example:**
 

@@ -645,17 +645,28 @@ steps:
 
         if ($createNewPatch) {
           # ===========================================================
-          # Create a new patch from this solution at postExportVersion
+          # Create a new patch from this solution at postExportVersion.
+          # If this solution is itself a patch, Dataverse requires the
+          # parent (base) solution as ParentSolutionUniqueName — you
+          # cannot create a patch from a patch.
           # ===========================================================
           try {
-            # Fetch the solution's current friendly name to use for the patch
+            # Resolve the correct parent for CloneAsPatch
+            $parentUniqueName = $name
+            if ($solution.PSObject.Properties["isPatch"] -and [bool]$solution.isPatch -and
+                $solution.PSObject.Properties["parentSolution"] -and $solution.parentSolution) {
+              $parentUniqueName = $solution.parentSolution
+              Write-Host "  '$name' is a patch — using parent '$parentUniqueName' as CloneAsPatch source."
+            }
+
+            # Fetch this solution's friendly name to use as the display name of the new patch
             $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=friendlyname"
             $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
             $friendlyName = $solResult.value[0].friendlyname
 
-            Write-Host "  Creating new patch from '$name' (base friendly name: '$friendlyName') at v$postVersion..."
+            Write-Host "  Creating new patch from '$parentUniqueName' (display name: '$friendlyName') at v$postVersion..."
             $cloneBody = @{
-              ParentSolutionUniqueName = $name
+              ParentSolutionUniqueName = $parentUniqueName
               DisplayName              = $friendlyName
               VersionNumber            = $postVersion
             } | ConvertTo-Json
