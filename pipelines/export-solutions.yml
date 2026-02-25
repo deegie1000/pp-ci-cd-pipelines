@@ -836,7 +836,7 @@ steps:
       try {
         $pr = Invoke-RestMethod -Uri $createUrl -Method Post -Headers $headers -Body $prBody
         $prId = $pr.pullRequestId
-        Write-Host "Pull Request created: PR #$prId"
+        Write-Host "Pull Request created: PR #${prId}"
         Write-Host "URL: $($pr.url)"
       } catch {
         Write-Error "Failed to create Pull Request: $_"
@@ -863,9 +863,9 @@ steps:
 
       try {
         $updated = Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $completeBody
-        Write-Host "PR #$prId set to auto-complete."
+        Write-Host "PR #${prId} set to auto-complete."
       } catch {
-        Write-Host "##vso[task.logissue type=warning]Could not set auto-complete on PR #$prId. It may require manual completion: $_"
+        Write-Host "##vso[task.logissue type=warning]Could not set auto-complete on PR #${prId}. It may require manual completion: $_"
       }
 
       # -----------------------------------------------------------------
@@ -879,9 +879,9 @@ steps:
 
       try {
         Invoke-RestMethod -Uri $reviewerUrl -Method Put -Headers $headers -Body $approveBody | Out-Null
-        Write-Host "PR #$prId approved."
+        Write-Host "PR #${prId} approved."
       } catch {
-        Write-Host "##vso[task.logissue type=warning]Could not auto-approve PR #$prId: $_"
+        Write-Host "##vso[task.logissue type=warning]Could not auto-approve PR #${prId}: $_"
       }
 
       # -----------------------------------------------------------------
@@ -901,9 +901,9 @@ steps:
 
       try {
         $completed = Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $mergeBody
-        Write-Host "PR #$prId completed and merged into main."
+        Write-Host "PR #${prId} completed and merged into main."
       } catch {
-        Write-Host "##vso[task.logissue type=warning]Could not auto-complete PR #$prId. It may require branch policies to be satisfied first: $_"
+        Write-Host "##vso[task.logissue type=warning]Could not auto-complete PR #${prId}. It may require branch policies to be satisfied first: $_"
         Write-Host "The PR has been set to auto-complete and will merge once all policies are met."
       }
 
