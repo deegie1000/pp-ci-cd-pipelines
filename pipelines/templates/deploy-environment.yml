@@ -177,10 +177,6 @@ stages:
                     }
 
                     $installedList = @($listJson | ConvertFrom-Json)
-                    if ($installedList.Count -gt 0) {
-                      Write-Host "DEBUG: solution list entry sample: $($installedList[0] | ConvertTo-Json -Compress)"
-                    }
-
                     $installed = @{}
                     foreach ($s in $installedList) {
                       # pac v2 uses 'solutionUniqueName'; fall back to 'uniqueName' for older versions
@@ -244,6 +240,7 @@ stages:
                       Write-Host "============================================"
 
                       # Check if already installed at this version
+                      $isUpgrade = $false
                       if ($installed.ContainsKey($name)) {
                         $installedVersion = $installed[$name]
                         if ($installedVersion -eq $version) {
@@ -252,6 +249,7 @@ stages:
                           continue
                         }
                         Write-Host "  Currently installed: v$installedVersion — upgrading to v$version"
+                        $isUpgrade = $true
                       } else {
                         Write-Host "  Not currently installed — fresh install"
                       }
@@ -259,14 +257,17 @@ stages:
                       # Import managed solution
                       Write-Host "  Importing managed solution..."
 
-                      # Check for deployment settings
+                      # Use --stage-and-upgrade only when upgrading; fresh installs don't have
+                      # a base solution to hold against and will fail with ImportAsHolding.
                       $importArgs = @(
                         "solution", "import",
                         "--path", $zipPath,
-                        "--stage-and-upgrade",
-                        "--skip-lower-version",
                         "--activate-plugins"
                       )
+                      if ($isUpgrade) {
+                        $importArgs += "--stage-and-upgrade"
+                        $importArgs += "--skip-lower-version"
+                      }
 
                       $includeSettings = $false
                       if ($solution.PSObject.Properties["includeDeploymentSettings"]) {
