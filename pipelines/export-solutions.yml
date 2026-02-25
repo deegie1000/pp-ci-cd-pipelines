@@ -340,7 +340,6 @@ steps:
         pac solution unpack `
           --zipfile $unmanagedZip `
           --folder $solutionUnpackDir `
-          --processCanvasApps `
           --allowDelete true `
           --allowWrite true
 
@@ -412,23 +411,24 @@ steps:
         Write-Host "  Renamed unmanaged zip: $versionedUnmanagedZip"
 
         # -----------------------------------------------------------------
-        # Pack as managed solution (with version in filename)
+        # Export managed solution directly from Power Platform
         # -----------------------------------------------------------------
         $managedZip = Join-Path $managedDir "${name}_${version}.zip"
-        Write-Host "`nPacking managed solution..."
+        Write-Host "`nExporting managed solution..."
         Write-Host "  Target: $managedZip"
 
-        pac solution pack `
-          --zipfile $managedZip `
-          --folder $solutionUnpackDir `
-          --packagetype Managed
+        pac solution export `
+          --name $name `
+          --path $managedZip `
+          --managed `
+          --overwrite
 
         if ($LASTEXITCODE -ne 0) {
-          Write-Error "Failed to pack managed solution: $name"
+          Write-Error "Failed to export managed solution: $name"
           $failedSolutions += $name
           continue
         }
-        Write-Host "  Managed pack complete."
+        Write-Host "  Managed export complete."
 
         # Copy managed zip to artifact staging directory
         Copy-Item -Path $managedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
