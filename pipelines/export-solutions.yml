@@ -843,6 +843,25 @@ steps:
         exit 1
       }
 
+      $updateUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}?api-version=7.1"
+
+      # -----------------------------------------------------------------
+      # Attempt to approve the PR (with build service identity)
+      # Must happen before auto-complete/merge so the PR is still active
+      # -----------------------------------------------------------------
+      Write-Host "`nAttempting to approve PR..."
+
+      $approveBody = @{ vote = 10 } | ConvertTo-Json
+
+      $reviewerUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}/reviewers/$($pr.createdBy.id)?api-version=7.1"
+
+      try {
+        Invoke-RestMethod -Uri $reviewerUrl -Method Put -Headers $headers -Body $approveBody | Out-Null
+        Write-Host "PR #${prId} approved."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not auto-approve PR #${prId}: $_"
+      }
+
       # -----------------------------------------------------------------
       # Set the PR to auto-complete with squash merge
       # -----------------------------------------------------------------
@@ -859,29 +878,11 @@ steps:
         }
       } | ConvertTo-Json -Depth 5
 
-      $updateUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}?api-version=7.1"
-
       try {
         $updated = Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $completeBody
         Write-Host "PR #${prId} set to auto-complete."
       } catch {
         Write-Host "##vso[task.logissue type=warning]Could not set auto-complete on PR #${prId}. It may require manual completion: $_"
-      }
-
-      # -----------------------------------------------------------------
-      # Attempt to approve the PR (with build service identity)
-      # -----------------------------------------------------------------
-      Write-Host "`nAttempting to approve PR..."
-
-      $approveBody = @{ vote = 10 } | ConvertTo-Json
-
-      $reviewerUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}/reviewers/$($pr.createdBy.id)?api-version=7.1"
-
-      try {
-        Invoke-RestMethod -Uri $reviewerUrl -Method Put -Headers $headers -Body $approveBody | Out-Null
-        Write-Host "PR #${prId} approved."
-      } catch {
-        Write-Host "##vso[task.logissue type=warning]Could not auto-approve PR #${prId}: $_"
       }
 
       # -----------------------------------------------------------------
