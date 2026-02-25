@@ -11,11 +11,12 @@
 # Prerequisites:
 #   1. Power Platform Build Tools extension installed in the ADO org
 #   2. A Power Platform service connection named in the variable below
-#   3. Secret variables configured in the pipeline UI or a variable group:
-#      - ClientId       : Service Principal Application (Client) ID
-#      - ClientSecret   : Service Principal Client Secret
-#      - TenantId       : Azure AD Tenant ID
-#      (These should match the service principal backing the service connection)
+#   3. A variable group named "PowerPlatform-Dev" linked to this pipeline with:
+#      - EnvironmentUrl  : Power Platform environment URL
+#      - ClientId        : Service Principal Application (Client) ID
+#      - ClientSecret    : Service Principal Client Secret (mark as secret)
+#      - TenantId        : Azure AD Tenant ID
+#      (ClientId/ClientSecret/TenantId must match the service principal backing the service connection)
 #   4. Build Service account has "Contribute" and "Create Pull Request"
 #      permissions on the repository
 # =============================================================================
@@ -53,25 +54,20 @@ parameters:
 # Variables
 # -----------------------------------------------------------------------------
 variables:
+  # Variable group supplying environment credentials.
+  # Must contain: EnvironmentUrl, ClientId, ClientSecret (secret), TenantId
+  - group: PowerPlatform-Dev
+
   # Name of the Power Platform service connection in ADO (used for reference;
-  # pac CLI auth uses the secret variables below which should match the same
-  # service principal).
+  # pac CLI auth uses ClientId/ClientSecret/TenantId from the variable group
+  # above, which must match the service principal backing this connection).
   - name: PowerPlatformServiceConnection
     value: "PowerPlatformDev"
-
-  # Power Platform environment URL for the dev environment
-  - name: EnvironmentUrl
-    value: "https://yourorg.crm.dynamics.com"
 
   # Prefix applied to patch solution display names after export.
   # Used to mark old patches as obsolete so developers work on the new version.
   - name: PatchDisplayNamePrefix
     value: "(DO NOT USE) "
-
-  # Secret variables (configure in pipeline UI or link a variable group):
-  #   ClientId     - Service Principal Application (Client) ID
-  #   ClientSecret - Service Principal Client Secret (mark as secret)
-  #   TenantId     - Azure AD Tenant ID
 
 pool:
   vmImage: "windows-latest"
@@ -654,11 +650,12 @@ steps:
           # relying on build.json flags, which may not be set on re-runs.
           # ===========================================================
           try {
-            # Query this solution's friendly name and parent (if any) in one call
-            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=friendlyname&`$expand=parentsolutionid(`$select=uniquename)"
+            # Query this solution's friendly name, id, and parent (if any) in one call
+            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename)"
             $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
             $solRecord  = $solResult.value[0]
             $friendlyName = $solRecord.friendlyname
+            $solutionId   = $solRecord.solutionid
 
             # If Dataverse returns a parent solution, this is itself a patch —
             # CloneAsPatch must use the base solution, not this patch.
@@ -678,6 +675,25 @@ steps:
 
             Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsPatch" -Method Post -Headers $apiHeaders -Body $cloneBody
             Write-Host "  New patch created successfully at v$postVersion."
+
+            # -----------------------------------------------------------
+            # If the solution being superseded is itself a patch, mark it
+            # with the "(DO NOT USE) " prefix so developers know to use
+            # the newly created patch instead.
+            # -----------------------------------------------------------
+            if ($solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename) {
+              $prefix = "$(PatchDisplayNamePrefix)"
+              if (-not $friendlyName.StartsWith($prefix)) {
+                $newDisplayName = "$prefix$friendlyName"
+                Write-Host "  Marking old patch '$name' as obsolete: '$newDisplayName'..."
+                $renameBody = @{ friendlyname = $newDisplayName } | ConvertTo-Json
+                Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/solutions($solutionId)" `
+                  -Method Patch -Headers $apiHeaders -Body $renameBody | Out-Null
+                Write-Host "  Old patch display name updated to: '$newDisplayName'"
+              } else {
+                Write-Host "  Old patch already has prefix — skipping rename."
+              }
+            }
           } catch {
             Write-Error "  Failed to create patch from '$name': $($_.Exception.Message)"
             $failedUpdates += $name
