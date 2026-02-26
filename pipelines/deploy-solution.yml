@@ -88,11 +88,13 @@ stages:
 
                 # ===============================================================
                 # Download managed solution artifact (auto-triggered runs only)
+                # Skips gracefully on manual runs — continueOnError lets the
+                # resolve step fall back to the repo path when no artifact exists.
                 # ===============================================================
                 - download: exportSolution
                   artifact: ManagedSolution
                   displayName: "Download managed solution from export pipeline"
-                  condition: eq(variables['Build.Reason'], 'ResourceTrigger')
+                  continueOnError: true
 
                 # ===============================================================
                 # Install pac CLI
@@ -131,11 +133,15 @@ stages:
                 - pwsh: |
                     $ErrorActionPreference = "Stop"
 
-                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
-                      # -----------------------------------------------------------
+                    # -----------------------------------------------------------
+                    # Determine source: artifact (auto-triggered) or repo (manual)
+                    # Check for the artifact directory rather than Build.Reason —
+                    # Build.Reason is unreliable inside deployment jobs.
+                    # -----------------------------------------------------------
+                    $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
+
+                    if (Test-Path $artifactDir) {
                       # Auto-triggered: find the zip in the downloaded artifact
-                      # -----------------------------------------------------------
-                      $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
                       Write-Host "Looking for managed solution in artifact: $artifactDir"
 
                       $zips = Get-ChildItem -Path $artifactDir -Filter "*.zip" -ErrorAction SilentlyContinue
@@ -150,9 +156,7 @@ stages:
                       Write-Host "Found solution artifact: $solutionZip"
 
                     } else {
-                      # -----------------------------------------------------------
                       # Manual run: use the repo path based on parameter
-                      # -----------------------------------------------------------
                       $solutionName = "${{ parameters.solutionName }}"
 
                       if (-not $solutionName) {
@@ -176,7 +180,7 @@ stages:
                     Write-Host "============================================"
 
                     # Check for deployment settings file
-                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
+                    if (Test-Path $artifactDir) {
                       $settingsPath = Join-Path (Split-Path $solutionZip) "deploymentSettings_Dev.json"
                     } else {
                       $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/preDev/deploymentSettings_Dev.json"
@@ -248,11 +252,9 @@ stages:
                     # Locate build.json — auto-triggered has it in the artifact,
                     # manual runs may not have it at all (single solution deploy)
                     $buildJsonPath = $null
-                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
-                      $candidatePath = "$(Pipeline.Workspace)/exportSolution/ManagedSolution/build.json"
-                      if (Test-Path $candidatePath) {
-                        $buildJsonPath = $candidatePath
-                      }
+                    $candidatePath = "$(Pipeline.Workspace)/exportSolution/ManagedSolution/build.json"
+                    if (Test-Path $candidatePath) {
+                      $buildJsonPath = $candidatePath
                     }
 
                     if (-not $buildJsonPath) {
@@ -315,8 +317,8 @@ stages:
                     Write-Host "Staged solution for downstream stages: $(SolutionZipPath)"
 
                     # Also stage build.json and config data files if available (for downstream config data upsert)
-                    if ("$(Build.Reason)" -eq "ResourceTrigger") {
-                      $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
+                    $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
+                    if (Test-Path $artifactDir) {
                       $buildJsonSrc = Join-Path $artifactDir "build.json"
                       if (Test-Path $buildJsonSrc) {
                         Copy-Item -Path $buildJsonSrc -Destination "$stagingDir/build.json"
