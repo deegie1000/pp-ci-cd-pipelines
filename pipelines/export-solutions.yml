@@ -160,6 +160,12 @@ steps:
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
+      # Record the pipeline branch HEAD before switching, so we can restore
+      # scripts/ afterward. The full branch checkout overwrites all files
+      # (including scripts/) with the export branch's potentially-older versions.
+      $pipelineHead = git rev-parse HEAD
+      Write-Host "Pipeline HEAD: $pipelineHead"
+
       Write-Host "Fetching export branch: $(ExportBranch)"
       git fetch origin "$(ExportBranch)"
 
@@ -167,7 +173,12 @@ steps:
       git checkout "$(ExportBranch)"
       git pull origin "$(ExportBranch)"
 
-      Write-Host "Successfully checked out $(ExportBranch)"
+      # Restore scripts/ from the pipeline branch so we always run the latest
+      # version of all scripts, not whatever is on the (possibly older) export branch.
+      Write-Host "Restoring scripts/ from pipeline branch ($pipelineHead)..."
+      git checkout "$pipelineHead" -- "scripts/"
+
+      Write-Host "Successfully checked out $(ExportBranch) with latest scripts"
     displayName: "Checkout export branch"
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
