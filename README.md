@@ -156,9 +156,10 @@ On-demand pipeline that exports a **single solution** from the **Pre-Dev** envir
 2. Exports the specified solution as **unmanaged** from Pre-Dev using `pac solution export` &rarr; `solutions/unmanaged/{name}.zip`
 3. Performs a **clean unpack** using `pac solution unpack` (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/{name}/`
 4. Exports the **managed** solution directly from Pre-Dev using `pac solution export --managed` &rarr; `solutions/managed/{name}.zip`
-5. Commits the results and pushes to the repository
-6. Publishes the managed zip and **all** `deploymentSettings_*.json` files from `deploymentSettings/preDev/` as a pipeline artifact
-7. **Automatically triggers** the Deploy Solution pipeline (Dev &rarr; QA &rarr; Stage &rarr; Prod)
+5. Creates a timestamped branch `export/predev/{yyyy-MM-dd-HHmmss}`, commits the solution files, and pushes to that branch
+6. Creates a Pull Request from the export branch to `main`, sets auto-complete (squash merge), and deletes the source branch
+7. Publishes the managed zip and **all** `deploymentSettings_*.json` files from `deploymentSettings/preDev/` as a pipeline artifact
+8. **Automatically triggers** the Deploy Solution pipeline (Dev &rarr; QA &rarr; Stage &rarr; Prod)
 
 **Trigger:** Manual only (run on demand from the ADO UI).
 
@@ -245,10 +246,11 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │     Pre-Dev environment         │  ───► │  │  Dev  │────►│  QA   │────►│ Stage │─►│ Prod ││
 │  2. Clean unpack (pac CLI)      │       │  │ (auto)│     │(appv.)│     │(appv.)│  │(appv)││
 │  3. Export managed directly     │       │  └───────┘     └───────┘     └───────┘  └──────┘│
-│  4. Commit to repo              │       │                                                   │
-│  5. Publish artifact + all      │       │  Each stage:                                      │
-│     preDev settings files       │       │  - Imports managed solution                        │
-│                                 │       │  - Applies preDev/{stage}.json settings            │
+│  4. Create export/predev/       │       │                                                   │
+│     {timestamp} branch + commit │       │  Each stage:                                      │
+│  5. PR to main → squash merge   │       │  - Imports managed solution                        │
+│  6. Publish artifact + all      │       │  - Applies preDev/{stage}.json settings            │
+│     preDev settings files       │       │                                                   │
 └─────────────────────────────────┘       └──────────────────────────────────────────────────┘
 ```
 
@@ -743,9 +745,9 @@ The pipeline's build service identity needs permissions to push commits and crea
 4. Set the following permissions to **Allow**:
    - **Contribute**
    - **Create branch**
-   - **Force push (rewrite history, delete branches)** (for the daily export pipeline — required to delete the export branch after merge)
-   - **Create pull requests** (for the daily export pipeline)
-   - **Contribute to pull requests** (for the daily export pipeline)
+   - **Force push (rewrite history, delete branches)** (required to delete the export branch after merge — used by both export pipelines)
+   - **Create pull requests** (used by both export pipelines)
+   - **Contribute to pull requests** (used by both export pipelines)
 
 ---
 
@@ -808,7 +810,7 @@ The pipeline will skip any solution already installed at the target version in t
 4. Enter the **Solution unique name** (exactly as it appears in Power Platform)
 5. Click **Run**
 
-The pipeline will export from Pre-Dev (unmanaged + managed directly via pac CLI), unpack, commit, and automatically trigger the deploy pipeline. The solution will deploy to Dev immediately, then pause at QA, Stage, and Prod for approval.
+The pipeline will export from Pre-Dev (unmanaged + managed directly via pac CLI), unpack, create an `export/predev/{timestamp}` branch, commit the solution files, create a PR to `main` (squash merge), and automatically trigger the deploy pipeline. The solution will deploy to Dev immediately, then pause at QA, Stage, and Prod for approval.
 
 **For QA, Stage, and Prod:**
 
@@ -944,4 +946,6 @@ Common examples:
 | Manual deploy says "solution not found" | Solution not in repo | Run the export pipeline first, or verify `solutions/managed/{name}.zip` exists in the repo |
 | QA/Stage/Prod stuck waiting | No one has approved | Approvers need to go to the pipeline run and click **Approve** on the pending stage |
 | "No solution zip found in artifact" in QA/Stage/Prod | Dev stage didn't publish artifact | Check the Dev stage logs &mdash; it may have failed before the publish step |
-| "Failed to push changes" | Build service lacks Contribute permission | Grant the Build Service account **Contribute** permission on the repository (see Step 9) |
+| "Failed to push branch" | Build service lacks Contribute or Create branch permission | Grant the Build Service account **Contribute** and **Create branch** permissions on the repository (see Step 9) |
+| "Failed to create Pull Request" | Build service lacks Create pull request permission | Grant the Build Service account **Create pull requests** and **Contribute to pull requests** permissions on the repository (see Step 9) |
+| "Could not delete source branch" warning after PR merge | Build service lacks Force push permission | Grant **Force push (rewrite history, delete branches)** to the Build Service account on the repository (see Step 9) |

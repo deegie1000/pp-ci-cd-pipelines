@@ -15,7 +15,8 @@
 #      - ClientId        : Service Principal Application (Client) ID
 #      - ClientSecret    : Service Principal Client Secret (mark as secret)
 #      - TenantId        : Azure AD Tenant ID
-#   3. Build Service account has "Contribute" permission on the repository
+#   3. Build Service account has "Contribute" and "Create Pull Request"
+#      permissions on the repository
 # =============================================================================
 
 trigger: none
@@ -176,7 +177,7 @@ steps:
     displayName: "Export managed solution from Pre-Dev"
 
   # ===========================================================================
-  # Step 9: Commit and push solution files to the repository
+  # Step 9: Create export branch, commit, and push solution files
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -190,29 +191,186 @@ steps:
       # Check for changes
       $status = git status --porcelain solutions/
       if (-not $status) {
-        Write-Host "No changes detected in solutions/ directory. Skipping commit."
+        Write-Host "No changes detected in solutions/ directory. Skipping commit and PR."
+        Write-Host "##vso[task.setvariable variable=HasChanges]false"
         exit 0
       }
 
       Write-Host "Changes detected:"
       git status --short solutions/
 
-      # Commit and push
-      $commitMsg = "chore: export ${{ parameters.solutionName }} from Pre-Dev"
-      git commit -m "$commitMsg"
+      # Create a timestamped export branch
+      $timestamp    = Get-Date -Format "yyyy-MM-dd-HHmmss"
+      $exportBranch = "export/predev/$timestamp"
 
-      git push
+      Write-Host "Creating branch: $exportBranch"
+      git checkout -b $exportBranch
 
       if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to push changes"
+        Write-Error "Failed to create branch: $exportBranch"
         exit 1
       }
 
-      Write-Host "Changes committed and pushed."
-    displayName: "Commit and push solution files"
+      # Commit
+      $commitMsg = "chore: export ${{ parameters.solutionName }} from Pre-Dev"
+      git commit -m $commitMsg
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to commit changes"
+        exit 1
+      }
+
+      # Push the new branch to origin
+      git push origin $exportBranch
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to push branch: $exportBranch"
+        exit 1
+      }
+
+      Write-Host "Changes committed and pushed to $exportBranch"
+      Write-Host "##vso[task.setvariable variable=ExportBranch]$exportBranch"
+      Write-Host "##vso[task.setvariable variable=HasChanges]true"
+    displayName: "Create export branch and push solution files"
 
   # ===========================================================================
-  # Step 10: Stage artifacts (managed solution + all preDev deployment settings)
+  # Step 10: Create Pull Request to main with squash merge, delete source branch
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $orgUrl  = "$(System.TeamFoundationCollectionUri)"
+      $project = "$(System.TeamProject)"
+      $repoId  = "$(Build.Repository.ID)"
+      $token   = $env:SYSTEM_ACCESSTOKEN
+
+      $headers = @{
+        "Authorization" = "Bearer $token"
+        "Content-Type"  = "application/json"
+      }
+
+      $description = (
+        "## Automated Solution Export (Pre-Dev)`n`n" +
+        "**Solution:** ``${{ parameters.solutionName }}```n" +
+        "**Branch:**   ``$(ExportBranch)```n`n" +
+        "---`n" +
+        "*This PR was created automatically by the export-solution-predev pipeline.*"
+      )
+
+      $prBody = @{
+        sourceRefName = "refs/heads/$(ExportBranch)"
+        targetRefName = "refs/heads/main"
+        title         = "Export ${{ parameters.solutionName }} from Pre-Dev [$(ExportBranch)]"
+        description   = $description
+      } | ConvertTo-Json -Depth 5
+
+      $createUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests?api-version=7.1"
+      Write-Host "Creating Pull Request..."
+
+      try {
+        $pr   = Invoke-RestMethod -Uri $createUrl -Method Post -Headers $headers -Body $prBody
+        $prId = $pr.pullRequestId
+        Write-Host "Pull Request created: PR #${prId}"
+      } catch {
+        Write-Error "Failed to create Pull Request: $_"
+        exit 1
+      }
+
+      $updateUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}?api-version=7.1"
+
+      # -----------------------------------------------------------------------
+      # Attempt to approve the PR (build service identity)
+      # Must happen before auto-complete so the PR is still active
+      # -----------------------------------------------------------------------
+      Write-Host "`nAttempting to approve PR..."
+      $approveBody = @{ vote = 10 } | ConvertTo-Json
+      $reviewerUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}/reviewers/$($pr.createdBy.id)?api-version=7.1"
+
+      try {
+        Invoke-RestMethod -Uri $reviewerUrl -Method Put -Headers $headers -Body $approveBody | Out-Null
+        Write-Host "PR #${prId} approved."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not auto-approve PR #${prId}: $_"
+      }
+
+      # -----------------------------------------------------------------------
+      # Set auto-complete with squash merge
+      # -----------------------------------------------------------------------
+      Write-Host "`nSetting PR to auto-complete..."
+      $mergeMsg     = "chore: export ${{ parameters.solutionName }} from Pre-Dev [$(ExportBranch)]"
+      $completeBody = @{
+        autoCompleteSetBy = @{ id = $pr.createdBy.id }
+        completionOptions = @{
+          deleteSourceBranch = $true
+          mergeStrategy      = "squash"
+          mergeCommitMessage = $mergeMsg
+        }
+      } | ConvertTo-Json -Depth 5
+
+      try {
+        Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $completeBody | Out-Null
+        Write-Host "PR #${prId} set to auto-complete."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not set auto-complete on PR #${prId}: $_"
+      }
+
+      # -----------------------------------------------------------------------
+      # Attempt to complete (merge) the PR directly
+      # -----------------------------------------------------------------------
+      Write-Host "`nAttempting to complete (merge) PR..."
+      $mergeBody = @{
+        status                = "completed"
+        lastMergeSourceCommit = $pr.lastMergeSourceCommit
+        completionOptions     = @{
+          deleteSourceBranch = $true
+          mergeStrategy      = "squash"
+          mergeCommitMessage = $mergeMsg
+        }
+      } | ConvertTo-Json -Depth 5
+
+      try {
+        Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $mergeBody | Out-Null
+        Write-Host "PR #${prId} completed and merged into main."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not auto-complete PR #${prId}: $_"
+        Write-Host "The PR has been set to auto-complete and will merge once all policies are met."
+      }
+
+      # -----------------------------------------------------------------------
+      # Explicitly delete the source branch via refs API
+      # (completionOptions.deleteSourceBranch is unreliable in some ADO versions)
+      # -----------------------------------------------------------------------
+      Write-Host "`nDeleting source branch: $(ExportBranch)..."
+
+      try {
+        $refsUrl   = "${orgUrl}${project}/_apis/git/repositories/${repoId}/refs?filter=heads/$(ExportBranch)&api-version=7.1"
+        $branchRef = Invoke-RestMethod -Uri $refsUrl -Method Get -Headers $headers
+        if ($branchRef.value -and $branchRef.value.Count -gt 0) {
+          $deleteBody = @(
+            @{
+              name        = "refs/heads/$(ExportBranch)"
+              oldObjectId = $branchRef.value[0].objectId
+              newObjectId = "0000000000000000000000000000000000000000"
+            }
+          ) | ConvertTo-Json
+          Invoke-RestMethod -Uri "${orgUrl}${project}/_apis/git/repositories/${repoId}/refs?api-version=7.1" `
+            -Method Post -Headers $headers -Body $deleteBody | Out-Null
+          Write-Host "Source branch deleted: $(ExportBranch)"
+        } else {
+          Write-Host "Branch not found (may have already been deleted): $(ExportBranch)"
+        }
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not delete source branch $(ExportBranch): $_"
+      }
+
+      Write-Host "`nPull Request processing complete."
+    displayName: "Create and merge Pull Request"
+    condition: and(succeeded(), eq(variables['HasChanges'], 'true'))
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  # ===========================================================================
+  # Step 11: Stage artifacts (managed solution + all preDev deployment settings)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -242,7 +400,7 @@ steps:
     displayName: "Stage artifacts"
 
   # ===========================================================================
-  # Step 11: Publish managed solution as pipeline artifact
+  # Step 12: Publish managed solution as pipeline artifact
   #          (consumed by the deploy-solution pipeline)
   # ===========================================================================
   - task: PublishPipelineArtifact@1
