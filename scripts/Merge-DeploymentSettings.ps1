@@ -34,16 +34,22 @@ $ErrorActionPreference = "Stop"
 function Merge-SettingsArray {
   param(
     [Parameter(Mandatory = $true)]
+    [AllowNull()]
     [AllowEmptyCollection()]
     [array]$RootItems,
 
     [Parameter(Mandatory = $true)]
+    [AllowNull()]
     [AllowEmptyCollection()]
     [array]$ExportItems,
 
     [Parameter(Mandatory = $true)]
     [string]$KeyProperty
   )
+
+  # Normalize nulls — PowerShell can pass $null even with [AllowEmptyCollection()]
+  if ($null -eq $RootItems)   { $RootItems   = @() }
+  if ($null -eq $ExportItems) { $ExportItems = @() }
 
   # Build an ordered list: start with root items, overwrite or append from export
   $merged = [System.Collections.ArrayList]::new()
