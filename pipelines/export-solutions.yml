@@ -571,191 +571,7 @@ steps:
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 11: Post-export version management (bump versions in Dev)
-  # ===========================================================================
-  - pwsh: |
-      $ErrorActionPreference = "Stop"
-
-      $sourceDir = "$(Build.SourcesDirectory)"
-      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
-      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
-      $solutions = @($buildConfig.solutions)
-
-      # Check whether any solution has postExportVersion defined
-      $managed = @($solutions | Where-Object { $_.PSObject.Properties["postExportVersion"] -and $_.postExportVersion })
-      if ($managed.Count -eq 0) {
-        Write-Host "No solutions have postExportVersion defined. Skipping version management."
-        exit 0
-      }
-
-      Write-Host "============================================"
-      Write-Host "  Post-Export Version Management"
-      Write-Host "============================================"
-      Write-Host "Solutions with postExportVersion: $($managed.Count)"
-      Write-Host ""
-
-      # ---------------------------------------------------------------
-      # Acquire OAuth token for Dataverse API (needed for CloneAsPatch)
-      # ---------------------------------------------------------------
-      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
-      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
-      $tokenBody = @{
-        grant_type    = "client_credentials"
-        client_id     = "$(ClientId)"
-        client_secret = $env:ClientSecret
-        scope         = "$envUrl/.default"
-      }
-
-      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
-      $apiHeaders = @{
-        "Authorization"    = "Bearer $($tokenResponse.access_token)"
-        "OData-MaxVersion" = "4.0"
-        "OData-Version"    = "4.0"
-        "Content-Type"     = "application/json"
-        "Accept"           = "application/json"
-      }
-      Write-Host "Authenticated with Dataverse API."
-
-      # ---------------------------------------------------------------
-      # Process each solution that has postExportVersion
-      # ---------------------------------------------------------------
-      $failedUpdates = @()
-
-      foreach ($solution in $solutions) {
-        $name = $solution.name
-
-        if (-not $solution.PSObject.Properties["postExportVersion"] -or -not $solution.postExportVersion) {
-          Write-Host "Skipping '$name' — no postExportVersion defined."
-          continue
-        }
-
-        $postVersion   = $solution.postExportVersion
-        $createNewPatch = $false
-        if ($solution.PSObject.Properties["createNewPatch"]) {
-          $createNewPatch = [bool]$solution.createNewPatch
-        }
-
-        Write-Host "--------------------------------------------"
-        Write-Host "Solution: $name -> v$postVersion  (createNewPatch: $createNewPatch)"
-        Write-Host "--------------------------------------------"
-
-        # ---------------------------------------------------------------
-        # Query Dataverse for this solution's id, friendly name, and
-        # parent. Both the createNewPatch and version-bump paths need
-        # this to handle the case where $name is itself a patch.
-        # ---------------------------------------------------------------
-        try {
-          $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename,friendlyname)"
-          $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
-          $solRecord  = $solResult.value[0]
-          $friendlyName = $solRecord.friendlyname
-          $solutionId   = $solRecord.solutionid
-          $isAPatch     = $solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename
-          if ($isAPatch) {
-            $parentUniqueName   = $solRecord.parentsolutionid.uniquename
-            $parentFriendlyName = $solRecord.parentsolutionid.friendlyname
-            Write-Host "  '$name' is a patch — parent: '$parentUniqueName'"
-          } else {
-            $parentUniqueName   = $name
-            $parentFriendlyName = $friendlyName
-          }
-        } catch {
-          Write-Error "  Failed to query solution details for '$name': $($_.Exception.Message)"
-          $failedUpdates += $name
-          continue
-        }
-
-        if ($createNewPatch) {
-          # ===========================================================
-          # Create a new patch from this solution at postExportVersion.
-          # If this solution is itself a patch, Dataverse requires the
-          # parent (base) solution as ParentSolutionUniqueName — you
-          # cannot create a patch from a patch.
-          # ===========================================================
-          try {
-            Write-Host "  Creating new patch from '$parentUniqueName' (display name: '$friendlyName') at v$postVersion..."
-            $cloneBody = @{
-              ParentSolutionUniqueName = $parentUniqueName
-              DisplayName              = $friendlyName
-              VersionNumber            = $postVersion
-            } | ConvertTo-Json
-
-            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsPatch" -Method Post -Headers $apiHeaders -Body $cloneBody
-            Write-Host "  New patch created successfully at v$postVersion."
-
-            # -----------------------------------------------------------
-            # If the solution being superseded is itself a patch, mark it
-            # with the "(DO NOT USE) " prefix so developers know to use
-            # the newly created patch instead.
-            # -----------------------------------------------------------
-            if ($isAPatch) {
-              $prefix = "$(PatchDisplayNamePrefix)"
-              if (-not $friendlyName.StartsWith($prefix)) {
-                $newDisplayName = "$prefix$friendlyName"
-                Write-Host "  Marking old patch '$name' as obsolete: '$newDisplayName'..."
-                $renameBody = @{ friendlyname = $newDisplayName } | ConvertTo-Json
-                Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/solutions($solutionId)" `
-                  -Method Patch -Headers $apiHeaders -Body $renameBody | Out-Null
-                Write-Host "  Old patch display name updated to: '$newDisplayName'"
-              } else {
-                Write-Host "  Old patch already has prefix — skipping rename."
-              }
-            }
-          } catch {
-            Write-Error "  Failed to create patch from '$name': $($_.Exception.Message)"
-            $failedUpdates += $name
-            continue
-          }
-
-        } else {
-          # ===========================================================
-          # Clone the solution to postExportVersion.
-          # If $name is a patch, clone the parent (base) solution
-          # instead — pac solution online-version fails when a solution
-          # has existing patches; CloneAsSolution avoids this.
-          # ===========================================================
-          $targetName         = $parentUniqueName
-          $targetFriendlyName = $parentFriendlyName
-          if ($isAPatch) {
-            Write-Host "  '$name' is a patch — cloning parent '$targetName' to v$postVersion..."
-          } else {
-            Write-Host "  Cloning '$targetName' to v$postVersion..."
-          }
-
-          try {
-            $cloneBody = @{
-              ParentSolutionUniqueName = $targetName
-              DisplayName              = $targetFriendlyName
-              VersionNumber            = $postVersion
-            } | ConvertTo-Json
-
-            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsSolution" -Method Post -Headers $apiHeaders -Body $cloneBody
-            Write-Host "  Solution cloned successfully to v$postVersion."
-          } catch {
-            Write-Error "  Failed to clone solution '$targetName': $($_.Exception.Message)"
-            $failedUpdates += $name
-            continue
-          }
-        }
-      }
-
-      # ---------------------------------------------------------------
-      # Summary
-      # ---------------------------------------------------------------
-      Write-Host ""
-      if ($failedUpdates.Count -gt 0) {
-        Write-Error "Post-export version update failed for: $($failedUpdates -join ', ')"
-        exit 1
-      }
-
-      Write-Host "Post-export version management complete."
-    displayName: "Post-export version management"
-    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
-    env:
-      ClientSecret: $(ClientSecret)
-
-  # ===========================================================================
-  # Step 12: Merge export deployment settings into root
+  # Step 11: Merge export deployment settings into root
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -777,7 +593,7 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 13: Commit and push changes to the export branch
+  # Step 12: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -821,7 +637,7 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 14: Create a Pull Request and auto-complete (merge) into main
+  # Step 13: Create a Pull Request and auto-complete (merge) into main
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -974,3 +790,195 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'), eq(variables['HasChanges'], 'true'))
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  # ===========================================================================
+  # Step 14: Post-export version management (bump versions in Dev)
+  # ===========================================================================
+  # Runs last so a failure here does not block the PR or the commit.
+  # Errors are emitted as pipeline warnings and do not fail the build.
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $sourceDir = "$(Build.SourcesDirectory)"
+      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
+      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+      $solutions = @($buildConfig.solutions)
+
+      # Check whether any solution has postExportVersion defined
+      $managed = @($solutions | Where-Object { $_.PSObject.Properties["postExportVersion"] -and $_.postExportVersion })
+      if ($managed.Count -eq 0) {
+        Write-Host "No solutions have postExportVersion defined. Skipping version management."
+        exit 0
+      }
+
+      Write-Host "============================================"
+      Write-Host "  Post-Export Version Management"
+      Write-Host "============================================"
+      Write-Host "Solutions with postExportVersion: $($managed.Count)"
+      Write-Host ""
+
+      # ---------------------------------------------------------------
+      # Acquire OAuth token for Dataverse API (CloneAsPatch / CloneAsSolution)
+      # ---------------------------------------------------------------
+      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
+      }
+
+      try {
+        $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+        $apiHeaders = @{
+          "Authorization"    = "Bearer $($tokenResponse.access_token)"
+          "OData-MaxVersion" = "4.0"
+          "OData-Version"    = "4.0"
+          "Content-Type"     = "application/json"
+          "Accept"           = "application/json"
+        }
+        Write-Host "Authenticated with Dataverse API."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Post-export version management: failed to acquire Dataverse token: $($_.Exception.Message)"
+        exit 0
+      }
+
+      # ---------------------------------------------------------------
+      # Process each solution that has postExportVersion
+      # ---------------------------------------------------------------
+      $failedUpdates = @()
+
+      foreach ($solution in $solutions) {
+        $name = $solution.name
+
+        if (-not $solution.PSObject.Properties["postExportVersion"] -or -not $solution.postExportVersion) {
+          Write-Host "Skipping '$name' — no postExportVersion defined."
+          continue
+        }
+
+        $postVersion    = $solution.postExportVersion
+        $createNewPatch = $false
+        if ($solution.PSObject.Properties["createNewPatch"]) {
+          $createNewPatch = [bool]$solution.createNewPatch
+        }
+
+        Write-Host "--------------------------------------------"
+        Write-Host "Solution: $name -> v$postVersion  (createNewPatch: $createNewPatch)"
+        Write-Host "--------------------------------------------"
+
+        # ---------------------------------------------------------------
+        # Query Dataverse for this solution's id, friendly name, and
+        # parent. Both the createNewPatch and version-bump paths need
+        # this to handle the case where $name is itself a patch.
+        # ---------------------------------------------------------------
+        try {
+          $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename,friendlyname)"
+          $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
+          $solRecord  = $solResult.value[0]
+          $friendlyName = $solRecord.friendlyname
+          $solutionId   = $solRecord.solutionid
+          $isAPatch     = $solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename
+          if ($isAPatch) {
+            $parentUniqueName   = $solRecord.parentsolutionid.uniquename
+            $parentFriendlyName = $solRecord.parentsolutionid.friendlyname
+            Write-Host "  '$name' is a patch — parent: '$parentUniqueName'"
+          } else {
+            $parentUniqueName   = $name
+            $parentFriendlyName = $friendlyName
+          }
+        } catch {
+          Write-Host "##vso[task.logissue type=warning]Failed to query solution details for '$name': $($_.Exception.Message)"
+          $failedUpdates += $name
+          continue
+        }
+
+        if ($createNewPatch) {
+          # ===========================================================
+          # Create a new patch from this solution at postExportVersion.
+          # If this solution is itself a patch, Dataverse requires the
+          # parent (base) solution as ParentSolutionUniqueName — you
+          # cannot create a patch from a patch.
+          # ===========================================================
+          try {
+            $patchDisplayName = "$parentFriendlyName (PATCH)"
+            Write-Host "  Creating new patch from '$parentUniqueName' as '$patchDisplayName' at v$postVersion..."
+            $cloneBody = @{
+              ParentSolutionUniqueName = $parentUniqueName
+              DisplayName              = $patchDisplayName
+              VersionNumber            = $postVersion
+            } | ConvertTo-Json
+
+            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsPatch" -Method Post -Headers $apiHeaders -Body $cloneBody
+            Write-Host "  New patch created successfully at v$postVersion."
+
+            # -----------------------------------------------------------
+            # If the solution being superseded is itself a patch, mark it
+            # with the "(DO NOT USE) " prefix so developers know to use
+            # the newly created patch instead.
+            # -----------------------------------------------------------
+            if ($isAPatch) {
+              $prefix = "$(PatchDisplayNamePrefix)"
+              if (-not $friendlyName.StartsWith($prefix)) {
+                $newDisplayName = "$prefix$friendlyName"
+                Write-Host "  Marking old patch '$name' as obsolete: '$newDisplayName'..."
+                $renameBody = @{ friendlyname = $newDisplayName } | ConvertTo-Json
+                Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/solutions($solutionId)" `
+                  -Method Patch -Headers $apiHeaders -Body $renameBody | Out-Null
+                Write-Host "  Old patch display name updated to: '$newDisplayName'"
+              } else {
+                Write-Host "  Old patch already has prefix — skipping rename."
+              }
+            }
+          } catch {
+            Write-Host "##vso[task.logissue type=warning]Failed to create patch from '$name': $($_.Exception.Message)"
+            $failedUpdates += $name
+            continue
+          }
+
+        } else {
+          # ===========================================================
+          # Clone the solution to postExportVersion.
+          # If $name is a patch, clone the parent (base) solution
+          # instead — pac solution online-version fails when a solution
+          # has existing patches; CloneAsSolution avoids this.
+          # ===========================================================
+          $targetName         = $parentUniqueName
+          $targetFriendlyName = $parentFriendlyName
+          if ($isAPatch) {
+            Write-Host "  '$name' is a patch — cloning parent '$targetName' to v$postVersion..."
+          } else {
+            Write-Host "  Cloning '$targetName' to v$postVersion..."
+          }
+
+          try {
+            $cloneBody = @{
+              ParentSolutionUniqueName = $targetName
+              DisplayName              = $targetFriendlyName
+              VersionNumber            = $postVersion
+            } | ConvertTo-Json
+
+            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsSolution" -Method Post -Headers $apiHeaders -Body $cloneBody
+            Write-Host "  Solution cloned successfully to v$postVersion."
+          } catch {
+            Write-Host "##vso[task.logissue type=warning]Failed to clone solution '$targetName': $($_.Exception.Message)"
+            $failedUpdates += $name
+            continue
+          }
+        }
+      }
+
+      # ---------------------------------------------------------------
+      # Summary
+      # ---------------------------------------------------------------
+      Write-Host ""
+      if ($failedUpdates.Count -gt 0) {
+        Write-Host "##vso[task.logissue type=warning]Post-export version management failed for: $($failedUpdates -join ', ')"
+      } else {
+        Write-Host "Post-export version management complete."
+      }
+    displayName: "Post-export version management"
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
+    continueOnError: true
+    env:
+      ClientSecret: $(ClientSecret)

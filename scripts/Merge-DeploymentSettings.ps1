@@ -102,12 +102,15 @@ foreach ($exportFile in $exportFiles) {
     }
   }
 
-  # Ensure arrays exist (guard against $null from ConvertFrom-Json when a property
-  # is missing or explicitly null — @($null) is unreliable across PS versions)
-  $rootEnvVars   = if ($rootSettings.EnvironmentVariables)   { @($rootSettings.EnvironmentVariables)   } else { @() }
-  $rootConnRefs  = if ($rootSettings.ConnectionReferences)   { @($rootSettings.ConnectionReferences)   } else { @() }
-  $exportEnvVars = if ($exportSettings.EnvironmentVariables) { @($exportSettings.EnvironmentVariables) } else { @() }
-  $exportConnRefs= if ($exportSettings.ConnectionReferences) { @($exportSettings.ConnectionReferences) } else { @() }
+  # Ensure arrays exist. Using @(if (prop) { prop }) guarantees an array:
+  # - truthy value  → array of those items
+  # - null/empty    → @(nothing) = @()  (never null)
+  # The else { @() } pattern is unreliable — PowerShell pipelines @() as zero
+  # items, so the outer assignment receives $null rather than an empty array.
+  $rootEnvVars   = @(if ($rootSettings.EnvironmentVariables)   { $rootSettings.EnvironmentVariables   })
+  $rootConnRefs  = @(if ($rootSettings.ConnectionReferences)   { $rootSettings.ConnectionReferences   })
+  $exportEnvVars = @(if ($exportSettings.EnvironmentVariables) { $exportSettings.EnvironmentVariables })
+  $exportConnRefs= @(if ($exportSettings.ConnectionReferences) { $exportSettings.ConnectionReferences })
 
   # Merge
   $mergedEnvVars = Merge-SettingsArray -RootItems $rootEnvVars -ExportItems $exportEnvVars -KeyProperty "SchemaName"
