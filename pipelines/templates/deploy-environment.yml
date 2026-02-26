@@ -267,6 +267,7 @@ stages:
                       if ($isUpgrade) {
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
+                        $importArgs += "--async"
                       }
 
                       $includeSettings = $false
