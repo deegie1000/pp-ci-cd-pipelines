@@ -645,17 +645,19 @@ steps:
         # this to handle the case where $name is itself a patch.
         # ---------------------------------------------------------------
         try {
-          $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename)"
+          $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename,friendlyname)"
           $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
           $solRecord  = $solResult.value[0]
           $friendlyName = $solRecord.friendlyname
           $solutionId   = $solRecord.solutionid
           $isAPatch     = $solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename
           if ($isAPatch) {
-            $parentUniqueName = $solRecord.parentsolutionid.uniquename
+            $parentUniqueName   = $solRecord.parentsolutionid.uniquename
+            $parentFriendlyName = $solRecord.parentsolutionid.friendlyname
             Write-Host "  '$name' is a patch — parent: '$parentUniqueName'"
           } else {
-            $parentUniqueName = $name
+            $parentUniqueName   = $name
+            $parentFriendlyName = $friendlyName
           }
         } catch {
           Write-Error "  Failed to query solution details for '$name': $($_.Exception.Message)"
@@ -707,27 +709,33 @@ steps:
 
         } else {
           # ===========================================================
-          # Bump the solution version to postExportVersion.
-          # If $name is a patch, bump the parent (base) solution instead
-          # so that the next development cycle starts from a fresh base
-          # version rather than the superseded patch.
+          # Clone the solution to postExportVersion.
+          # If $name is a patch, clone the parent (base) solution
+          # instead — pac solution online-version fails when a solution
+          # has existing patches; CloneAsSolution avoids this.
           # ===========================================================
-          $targetName = $parentUniqueName
+          $targetName         = $parentUniqueName
+          $targetFriendlyName = $parentFriendlyName
           if ($isAPatch) {
-            Write-Host "  '$name' is a patch — bumping version on parent '$targetName' to v$postVersion..."
+            Write-Host "  '$name' is a patch — cloning parent '$targetName' to v$postVersion..."
+          } else {
+            Write-Host "  Cloning '$targetName' to v$postVersion..."
           }
 
-          pac solution online-version `
-            --solution-name $targetName `
-            --solution-version $postVersion
+          try {
+            $cloneBody = @{
+              ParentSolutionUniqueName = $targetName
+              DisplayName              = $targetFriendlyName
+              VersionNumber            = $postVersion
+            } | ConvertTo-Json
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "  Failed to set version for '$targetName'"
+            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/CloneAsSolution" -Method Post -Headers $apiHeaders -Body $cloneBody
+            Write-Host "  Solution cloned successfully to v$postVersion."
+          } catch {
+            Write-Error "  Failed to clone solution '$targetName': $($_.Exception.Message)"
             $failedUpdates += $name
             continue
           }
-
-          Write-Host "  Version set to $postVersion on '$targetName'."
         }
       }
 
