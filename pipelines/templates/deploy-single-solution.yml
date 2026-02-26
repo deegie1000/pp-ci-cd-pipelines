@@ -98,8 +98,76 @@ stages:
                       exit 1
                     }
 
-                    $solutionZip = $zips[0].FullName
+                    $solutionZip  = $zips[0].FullName
                     $solutionName = [System.IO.Path]::GetFileNameWithoutExtension($solutionZip)
+
+                    Write-Host "Checking solution: $solutionName"
+
+                    # -----------------------------------------------------------
+                    # Extract target version from the solution zip
+                    # -----------------------------------------------------------
+                    $targetVersion = $null
+                    try {
+                      Add-Type -Assembly System.IO.Compression.FileSystem
+                      $zip = [System.IO.Compression.ZipFile]::OpenRead($solutionZip)
+                      try {
+                        $entry = $zip.Entries | Where-Object { $_.FullName -eq "Other/Solution.xml" } | Select-Object -First 1
+                        if ($entry) {
+                          $reader = [System.IO.StreamReader]::new($entry.Open())
+                          $solutionXml = [xml]$reader.ReadToEnd()
+                          $reader.Dispose()
+                          $targetVersion = $solutionXml.ImportExportXml.SolutionManifest.Version
+                        }
+                      } finally {
+                        $zip.Dispose()
+                      }
+                    } catch {
+                      Write-Host "##vso[task.logissue type=warning]Could not read solution version from zip: $_"
+                    }
+
+                    if ($targetVersion) {
+                      Write-Host "Target version: $targetVersion"
+                    } else {
+                      Write-Host "Could not determine target version — proceeding with import."
+                    }
+
+                    # -----------------------------------------------------------
+                    # Query installed solutions and determine import mode
+                    # -----------------------------------------------------------
+                    $isInstalled = $false
+
+                    if ($targetVersion) {
+                      Write-Host "`nQuerying installed solutions in ${{ parameters.stageName }} environment..."
+                      $listJson = (pac solution list --json) | Out-String
+
+                      if ($LASTEXITCODE -eq 0) {
+                        $installedList = @($listJson | ConvertFrom-Json)
+                        $installedMap  = @{}
+                        foreach ($s in $installedList) {
+                          $key = if ($s.PSObject.Properties['solutionUniqueName']) { $s.solutionUniqueName } else { $s.uniqueName }
+                          $ver = if ($s.PSObject.Properties['version']) { $s.version } else { $s.versionNumber }
+                          if ($key) { $installedMap[$key] = $ver }
+                        }
+
+                        if ($installedMap.ContainsKey($solutionName)) {
+                          $installedVersion = $installedMap[$solutionName]
+                          if ($installedVersion -eq $targetVersion) {
+                            Write-Host ""
+                            Write-Host "============================================"
+                            Write-Host "  Already at target version — skipping"
+                            Write-Host "============================================"
+                            Write-Host "Solution '$solutionName' is already at v$targetVersion in ${{ parameters.stageName }}."
+                            exit 0
+                          }
+                          Write-Host "Installed: v$installedVersion — will upgrade to v$targetVersion"
+                          $isInstalled = $true
+                        } else {
+                          Write-Host "Solution not currently installed — fresh install."
+                        }
+                      } else {
+                        Write-Host "##vso[task.logissue type=warning]Could not query installed solutions — proceeding with import."
+                      }
+                    }
 
                     Write-Host ""
                     Write-Host "============================================"
@@ -112,15 +180,23 @@ stages:
                     # -----------------------------------------------------------
                     $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/preDev/deploymentSettings_${{ parameters.stageName }}.json"
 
+                    # -----------------------------------------------------------
+                    # Build import args based on install state
+                    # -----------------------------------------------------------
                     $importArgs = @(
                       "solution", "import",
                       "--path", $solutionZip,
-                      "--stage-and-upgrade",
-                      "--skip-lower-version",
-                      "--activate-plugins",
-                      "--async",
-                      "--max-async-wait-time", "60"
+                      "--activate-plugins"
                     )
+
+                    if ($isInstalled) {
+                      # Upgrading an existing solution — use staged upgrade
+                      $importArgs += "--stage-and-upgrade"
+                      $importArgs += "--skip-lower-version"
+                      $importArgs += "--async"
+                      $importArgs += "--max-async-wait-time"
+                      $importArgs += "60"
+                    }
 
                     if (Test-Path $settingsPath) {
                       Write-Host "Deployment settings found: $settingsPath"
