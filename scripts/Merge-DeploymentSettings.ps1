@@ -118,14 +118,17 @@ foreach ($exportFile in $exportFiles) {
   $exportEnvVars = @(if ($exportSettings.EnvironmentVariables) { $exportSettings.EnvironmentVariables })
   $exportConnRefs= @(if ($exportSettings.ConnectionReferences) { $exportSettings.ConnectionReferences })
 
-  # Merge
-  $mergedEnvVars = Merge-SettingsArray -RootItems $rootEnvVars -ExportItems $exportEnvVars -KeyProperty "SchemaName"
-  $mergedConnRefs = Merge-SettingsArray -RootItems $rootConnRefs -ExportItems $exportConnRefs -KeyProperty "LogicalName"
+  # Merge — @() re-wraps the return value to prevent PowerShell from unrolling
+  # a single-element array returned by the function into a bare scalar.
+  $mergedEnvVars  = @(Merge-SettingsArray -RootItems $rootEnvVars -ExportItems $exportEnvVars -KeyProperty "SchemaName")
+  $mergedConnRefs = @(Merge-SettingsArray -RootItems $rootConnRefs -ExportItems $exportConnRefs -KeyProperty "LogicalName")
 
-  # Build output
+  # Build output — cast to ArrayList so ConvertTo-Json always emits a JSON array,
+  # even when there is only one item. In PS5.1, a 1-element object[] property is
+  # serialized as a plain object rather than a single-element array.
   $output = [PSCustomObject]@{
-    EnvironmentVariables = $mergedEnvVars
-    ConnectionReferences = $mergedConnRefs
+    EnvironmentVariables = [System.Collections.ArrayList]$mergedEnvVars
+    ConnectionReferences = [System.Collections.ArrayList]$mergedConnRefs
   }
 
   # Write back
