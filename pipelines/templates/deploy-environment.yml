@@ -268,6 +268,8 @@ stages:
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
                         $importArgs += "--async"
+                        $importArgs += "--max-async-wait-time"
+                        $importArgs += "60"
                       }
 
                       $includeSettings = $false
@@ -291,51 +293,6 @@ stages:
 
                       Write-Host "  Successfully deployed."
                       $deployedSolutions += $name
-
-                      # ---------------------------------------------------------
-                      # Wait for the upgrade to fully apply in Dataverse.
-                      # pac solution import --stage-and-upgrade triggers the apply
-                      # (uninstall of old version) asynchronously and returns before
-                      # it completes. Poll until the active solution version matches.
-                      # ---------------------------------------------------------
-                      if ($isUpgrade -and $hasApiToken) {
-                        Write-Host "  Waiting for upgrade to fully apply in Dataverse..."
-                        $upgradeEnvUrl  = "$(EnvironmentUrl)".TrimEnd("/")
-                        $maxWaitSec     = 3600  # 1 hour
-                        $pollSec        = 30
-                        $waitedSec      = 0
-                        $upgradeApplied = $false
-
-                        while ($waitedSec -lt $maxWaitSec) {
-                          Start-Sleep -Seconds $pollSec
-                          $waitedSec += $pollSec
-
-                          try {
-                            $pollQuery  = "$upgradeEnvUrl/api/data/v9.2/solutions" +
-                              "?`$filter=uniquename eq '$name' and holdingsolution eq false" +
-                              "&`$select=version,holdingsolution"
-                            $pollResult = Invoke-RestMethod -Uri $pollQuery -Headers $apiHeaders
-                            $active     = $pollResult.value |
-                              Where-Object { -not $_.holdingsolution } |
-                              Select-Object -First 1
-
-                            if ($active -and $active.version -eq $version) {
-                              Write-Host "  Upgrade fully applied after ${waitedSec}s. Active version: $($active.version)"
-                              $upgradeApplied = $true
-                              break
-                            }
-
-                            $currentVer = if ($active) { $active.version } else { "(none yet)" }
-                            Write-Host "  Upgrade pending... active=$currentVer, target=$version (${waitedSec}s elapsed)"
-                          } catch {
-                            Write-Host "  Could not check upgrade status: $($_.Exception.Message)"
-                          }
-                        }
-
-                        if (-not $upgradeApplied) {
-                          Write-Host "##vso[task.logissue type=warning]Could not confirm upgrade completion for '$name' within ${maxWaitSec}s — proceeding anyway."
-                        }
-                      }
 
                       # ---------------------------------------------------------
                       # Activate cloud flows if this solution includes them

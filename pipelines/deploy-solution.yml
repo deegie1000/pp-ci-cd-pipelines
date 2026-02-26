@@ -210,7 +210,8 @@ stages:
                       "--stage-and-upgrade",
                       "--skip-lower-version",
                       "--activate-plugins",
-                      "--async"
+                      "--async",
+                      "--max-async-wait-time", "60"
                     )
 
                     if ("$(HasDeploymentSettings)" -eq "true") {
