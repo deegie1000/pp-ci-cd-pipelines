@@ -262,7 +262,8 @@ stages:
                       $importArgs = @(
                         "solution", "import",
                         "--path", $zipPath,
-                        "--activate-plugins"
+                        "--activate-plugins",
+                        "--max-async-wait-time", "60"
                       )
                       if ($isUpgrade) {
                         $importArgs += "--stage-and-upgrade"
