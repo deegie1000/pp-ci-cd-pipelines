@@ -437,7 +437,7 @@ stages:
     parameters:
       stageName: QA
       displayName: "Deploy to QA"
-      environmentName: "Power Platform QA"
+      environmentName: "Power Platform QA with Approval"
       variableGroup: "PowerPlatform-QA"
       dependsOn: Dev
 
