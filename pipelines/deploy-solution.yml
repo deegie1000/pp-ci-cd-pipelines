@@ -180,7 +180,7 @@ stages:
                     if ("$(Build.Reason)" -eq "ResourceTrigger") {
                       $settingsPath = Join-Path (Split-Path $solutionZip) "deploymentSettings_Dev.json"
                     } else {
-                      $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/deploymentSettings_Dev.json"
+                      $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/preDev/deploymentSettings_Dev.json"
                     }
 
                     if (Test-Path $settingsPath) {

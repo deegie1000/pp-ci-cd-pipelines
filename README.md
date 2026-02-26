@@ -16,10 +16,16 @@ pp-ci-cd-pipelines/
 │       └── deploy-single-solution.yml    # Reusable deploy template (used by deploy pipeline)
 ├── configData/                           # Extracted configuration data (populated by export)
 ├── deploymentSettings/
-│   ├── deploymentSettings_Dev.json      # Accumulated deployment settings for Dev
-│   ├── deploymentSettings_QA.json       # Accumulated deployment settings for QA
-│   ├── deploymentSettings_Stage.json    # Accumulated deployment settings for Stage
-│   └── deploymentSettings_Prod.json     # Accumulated deployment settings for Prod
+│   ├── preDev/                              # Deployment settings for Pre-Dev exports
+│   │   ├── deploymentSettings_Dev.json      #   Applied when deploying to Dev
+│   │   ├── deploymentSettings_QA.json       #   Applied when deploying to QA
+│   │   ├── deploymentSettings_Stage.json    #   Applied when deploying to Stage
+│   │   ├── deploymentSettings_Prod.json     #   Applied when deploying to Prod
+│   │   └── deploymentSettings_PreDev.json   #   Settings for the Pre-Dev environment itself
+│   ├── deploymentSettings_Dev.json          # Accumulated deployment settings for Dev (daily export)
+│   ├── deploymentSettings_QA.json           # Accumulated deployment settings for QA (daily export)
+│   ├── deploymentSettings_Stage.json        # Accumulated deployment settings for Stage (daily export)
+│   └── deploymentSettings_Prod.json         # Accumulated deployment settings for Prod (daily export)
 ├── exports/
 │   └── {yyyy-MM-dd-token}/
 │       ├── build.json                   # Export configuration per scheduled run
@@ -146,16 +152,17 @@ On-demand pipeline that exports a **single solution** from the **Pre-Dev** envir
 
 **What it does:**
 
-1. Exports the specified solution as **unmanaged** from Pre-Dev &rarr; `solutions/unmanaged/{name}.zip`
-2. Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/{name}/`
-3. Packs the unpacked source as a **managed** solution &rarr; `solutions/managed/{name}.zip`
-4. Commits the results and pushes to the repository
-5. Publishes the managed zip and `deploymentSettings_Dev.json` (from root `deploymentSettings/`, if it exists) as a pipeline artifact
-6. **Automatically triggers** the Deploy Solution pipeline (Dev &rarr; QA &rarr; Stage &rarr; Prod)
+1. Authenticates pac CLI with the Pre-Dev environment using credentials from the `PowerPlatform-PreDev` variable group
+2. Exports the specified solution as **unmanaged** from Pre-Dev using `pac solution export` &rarr; `solutions/unmanaged/{name}.zip`
+3. Performs a **clean unpack** using `pac solution unpack` (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/{name}/`
+4. Exports the **managed** solution directly from Pre-Dev using `pac solution export --managed` &rarr; `solutions/managed/{name}.zip`
+5. Commits the results and pushes to the repository
+6. Publishes the managed zip and **all** `deploymentSettings_*.json` files from `deploymentSettings/preDev/` as a pipeline artifact
+7. **Automatically triggers** the Deploy Solution pipeline (Dev &rarr; QA &rarr; Stage &rarr; Prod)
 
 **Trigger:** Manual only (run on demand from the ADO UI).
 
-**Auth:** Service connection only &mdash; no secret pipeline variables needed.
+**Auth:** Uses pac CLI with credentials from the `PowerPlatform-PreDev` variable group.
 
 ---
 
@@ -167,7 +174,7 @@ Multi-stage pipeline that deploys a single managed solution through all environm
 
 1. Downloads the managed solution artifact (Dev downloads from the export pipeline; QA/Stage/Prod download from the Dev stage's published artifact)
 2. Authenticates with the target environment using credentials from a per-environment variable group
-3. Checks for `deploymentSettings_{stage}.json` &mdash; in the artifact (Dev, auto-triggered) or in root `deploymentSettings/` folder (Dev manual, and all downstream stages)
+3. Checks for `deploymentSettings_{stage}.json` &mdash; in the artifact (Dev, auto-triggered) or in `deploymentSettings/preDev/` folder (Dev manual, and all downstream stages)
 4. Imports the managed solution, applying deployment settings if found
 5. **Upserts configuration data** &mdash; if `build.json` is present in the artifact and contains `configData`, PATCHes each record into the target environment. See [Configuration Data](#configuration-data)
 
@@ -236,12 +243,12 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │                                 │       │                                                   │
 │  1. Export unmanaged from       │       │  ┌───────┐     ┌───────┐     ┌───────┐  ┌──────┐│
 │     Pre-Dev environment         │  ───► │  │  Dev  │────►│  QA   │────►│ Stage │─►│ Prod ││
-│  2. Clean unpack                │       │  │ (auto)│     │(appv.)│     │(appv.)│  │(appv)││
-│  3. Pack as managed             │       │  └───────┘     └───────┘     └───────┘  └──────┘│
+│  2. Clean unpack (pac CLI)      │       │  │ (auto)│     │(appv.)│     │(appv.)│  │(appv)││
+│  3. Export managed directly     │       │  └───────┘     └───────┘     └───────┘  └──────┘│
 │  4. Commit to repo              │       │                                                   │
-│  5. Publish artifact + settings │       │  Each stage:                                      │
-│                                 │       │  - Imports managed solution                        │
-│                                 │       │  - Applies deployment settings if available        │
+│  5. Publish artifact + all      │       │  Each stage:                                      │
+│     preDev settings files       │       │  - Imports managed solution                        │
+│                                 │       │  - Applies preDev/{stage}.json settings            │
 └─────────────────────────────────┘       └──────────────────────────────────────────────────┘
 ```
 
@@ -587,30 +594,26 @@ Invoke-Pester tests/ -Output Detailed
 
 ### Step 3: Create Power Platform Service Connections
 
-Create a service connection for **each** environment that uses the ADO task-based approach.
-
-1. In your ADO project, go to **Project settings** > **Service connections** > **New service connection**
-2. Select **Power Platform**
-3. Fill in:
-   - **Server URL**: The environment URL (e.g., `https://yourorg-predev.crm.dynamics.com`)
-   - **Tenant ID**: From Step 2
-   - **Application (Client) ID**: From Step 2
-   - **Client Secret**: From Step 2
-4. Name and save the connection
-
-| Service Connection Name | Environment | Used By |
-|---|---|---|
-| `PowerPlatformPreDev` | Pre-Dev environment URL | Export Solution from Pre-Dev |
-| `PowerPlatformDev` | Dev environment URL | Daily Export Solutions |
-
-> **Tip:** If you use different names, update the corresponding variable in each pipeline YAML file.
+> **No service connections are required.** All four pipelines authenticate via pac CLI using credentials from variable groups (created in Step 4). The `PowerPlatformToolInstaller@2` task is used only to install the Power Platform Build Tools extension on the agent &mdash; it does not require a service connection.
+>
+> You can skip this step entirely.
 
 ### Step 4: Create Variable Groups (Release &amp; Deploy Pipelines)
 
-The release pipeline and deploy pipeline use **variable groups** to store per-environment credentials. Create one group for each target environment.
+The release pipeline, deploy pipeline, and pre-dev export pipeline use **variable groups** to store per-environment credentials. Create one group for each environment.
 
 1. Go to **Pipelines** > **Library** > **+ Variable group**
-2. Create four variable groups with the following names and variables:
+2. Create five variable groups with the following names and variables:
+
+**`PowerPlatform-PreDev`**
+
+| Variable | Value | Secret? |
+|---|---|---|
+| `EnvironmentUrl` | `https://yourorg-predev.crm.dynamics.com` | No |
+| `ClientId` | Application (Client) ID | No |
+| `ClientSecret` | Client secret value | **Yes** |
+| `TenantId` | Directory (Tenant) ID | No |
+
 
 **`PowerPlatform-Dev`**
 
@@ -698,43 +701,33 @@ Create pipelines in this order:
 > - The **release pipeline** references the export pipeline as `source: "export-solutions"`. The export pipeline's name in ADO must match this value.
 > - The **deploy pipeline** references the pre-dev export as `source: "Export Solution from Pre-Dev"`. Update if your pipeline name differs.
 
-### Step 7: Configure Secret Variables (Daily Export Pipeline Only)
+### Step 7: Link Variable Groups to Pipelines
 
-The **Daily Export Solutions** pipeline (`export-solutions.yml`) requires secret variables for pac CLI authentication. The other pipelines use service connections or variable groups.
+Each pipeline must be authorized to use its variable group(s). After creating the variable groups in Step 4:
 
-1. Open the `export-solutions` pipeline and click **Edit**
-2. Click **Variables** (top-right) > **New variable**
-3. Add each of the following, checking **Keep this value secret** for `ClientSecret`:
+1. Open each variable group in **Pipelines** > **Library**
+2. Click **Pipeline permissions**
+3. Click **+** and add the pipeline(s) that use that group:
 
-   | Variable Name | Value | Secret? |
-   |---|---|---|
-   | `ClientId` | Application (Client) ID from Step 2 | No |
-   | `ClientSecret` | Client secret value from Step 2 | **Yes** |
-   | `TenantId` | Directory (Tenant) ID from Step 2 | No |
-
-4. Click **Save**
-
-> **Tip:** For managing these across multiple pipelines, create a **Variable Group** under **Pipelines** > **Library** and link it to the pipeline instead.
+| Variable Group | Used By |
+|---|---|
+| `PowerPlatform-PreDev` | Export Solution from Pre-Dev |
+| `PowerPlatform-Dev` | Daily Export Solutions, Deploy Solution (Dev stage) |
+| `PowerPlatform-QA` | Release Solutions, Deploy Solution (QA stage) |
+| `PowerPlatform-Stage` | Release Solutions, Deploy Solution (Stage stage) |
+| `PowerPlatform-Prod` | Release Solutions, Deploy Solution (Prod stage) |
 
 ### Step 8: Update Pipeline Variables
 
-Edit each pipeline YAML and update the service connection names and environment URLs if they differ from the defaults:
+All pipelines use variable groups for configuration &mdash; there are no inline service connection names to update. If you named your variable groups differently from the defaults, update the `group:` references in each pipeline YAML.
 
 **`pipelines/export-solutions.yml`:**
-```yaml
-variables:
-  - name: PowerPlatformServiceConnection
-    value: "PowerPlatformDev"            # <-- your Dev service connection
-  - name: EnvironmentUrl
-    value: "https://yourorg.crm.dynamics.com"  # <-- your Dev environment URL
-```
+
+Uses the `PowerPlatform-Dev` variable group. No inline variables to configure &mdash; all credentials and the environment URL come from the variable group.
 
 **`pipelines/export-solution-predev.yml`:**
-```yaml
-variables:
-  - name: PreDevServiceConnection
-    value: "PowerPlatformPreDev"         # <-- your Pre-Dev service connection
-```
+
+Uses the `PowerPlatform-PreDev` variable group. No inline variables to configure &mdash; all credentials come from the variable group.
 
 **`pipelines/deploy-solution.yml`:**
 
@@ -815,7 +808,7 @@ The pipeline will skip any solution already installed at the target version in t
 4. Enter the **Solution unique name** (exactly as it appears in Power Platform)
 5. Click **Run**
 
-The pipeline will export from Pre-Dev, unpack, commit, pack as managed, and automatically trigger the deploy pipeline. The solution will deploy to Dev immediately, then pause at QA, Stage, and Prod for approval.
+The pipeline will export from Pre-Dev (unmanaged + managed directly via pac CLI), unpack, commit, and automatically trigger the deploy pipeline. The solution will deploy to Dev immediately, then pause at QA, Stage, and Prod for approval.
 
 **For QA, Stage, and Prod:**
 
@@ -942,7 +935,7 @@ Common examples:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Export fails with auth error | Service connection misconfigured | Verify the `PowerPlatformPreDev` service connection has the correct environment URL, tenant, app ID, and secret |
+| Export fails with auth error | Variable group misconfigured | Verify the `PowerPlatform-PreDev` variable group has correct `EnvironmentUrl`, `ClientId`, `ClientSecret`, and `TenantId` |
 | Export fails with "solution not found" | Solution name doesn't match | Use the exact **unique name** from Power Platform (not the display name) |
 | Deploy pipeline doesn't trigger | Pipeline name mismatch | Ensure the `source` value in `deploy-solution.yml` matches the exact name of the export pipeline in ADO |
 | Deploy pipeline doesn't trigger | Trigger branch filter | The export pipeline must run against `main` branch to trigger the deploy |

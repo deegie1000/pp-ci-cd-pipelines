@@ -110,14 +110,16 @@ stages:
                     # -----------------------------------------------------------
                     # Check for deployment settings
                     # -----------------------------------------------------------
-                    $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/deploymentSettings_${{ parameters.stageName }}.json"
+                    $settingsPath = "$(Build.SourcesDirectory)/deploymentSettings/preDev/deploymentSettings_${{ parameters.stageName }}.json"
 
                     $importArgs = @(
                       "solution", "import",
                       "--path", $solutionZip,
                       "--stage-and-upgrade",
                       "--skip-lower-version",
-                      "--activate-plugins"
+                      "--activate-plugins",
+                      "--async",
+                      "--max-async-wait-time", "60"
                     )
 
                     if (Test-Path $settingsPath) {
