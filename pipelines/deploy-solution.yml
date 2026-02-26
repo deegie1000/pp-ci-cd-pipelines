@@ -209,8 +209,7 @@ stages:
                       "--path", "$(SolutionZipPath)",
                       "--stage-and-upgrade",
                       "--skip-lower-version",
-                      "--activate-plugins",
-                      "--max-async-wait-time", "60"
+                      "--activate-plugins"
                     )
 
                     if ("$(HasDeploymentSettings)" -eq "true") {
