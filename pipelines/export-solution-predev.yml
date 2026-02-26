@@ -150,6 +150,22 @@ steps:
       }
 
       Write-Host "Unpack complete: $unpackDir"
+
+      # Read solution version from unpacked Solution.xml
+      $solutionXmlPath = "$unpackDir/Other/Solution.xml"
+      if (-not (Test-Path $solutionXmlPath)) {
+        Write-Error "Solution.xml not found at: $solutionXmlPath"
+        exit 1
+      }
+      [xml]$solutionXml = Get-Content $solutionXmlPath
+      $version = $solutionXml.ImportExportXml.SolutionManifest.Version
+      Write-Host "Solution version: $version"
+      Write-Host "##vso[task.setvariable variable=SolutionVersion]$version"
+
+      # Rename unmanaged zip to include version
+      $versionedUnmanagedZip = "$(Build.SourcesDirectory)/solutions/unmanaged/${{ parameters.solutionName }}_${version}.zip"
+      Move-Item -Path $unmanagedZip -Destination $versionedUnmanagedZip -Force
+      Write-Host "Renamed unmanaged zip: $versionedUnmanagedZip"
     displayName: "Unpack solution"
 
   # ===========================================================================
@@ -158,7 +174,7 @@ steps:
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      $managedZip = "$(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}.zip"
+      $managedZip = "$(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}_$(SolutionVersion).zip"
       Write-Host "Exporting managed solution: ${{ parameters.solutionName }}"
       Write-Host "  Target: $managedZip"
 
@@ -375,12 +391,12 @@ steps:
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      $managedZip = "$(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}.zip"
+      $managedZip = "$(Build.SourcesDirectory)/solutions/managed/${{ parameters.solutionName }}_$(SolutionVersion).zip"
       $stagingDir = "$(Build.ArtifactStagingDirectory)"
 
       # Copy managed solution zip
-      Copy-Item -Path $managedZip -Destination "$stagingDir/${{ parameters.solutionName }}.zip"
-      Write-Host "Staged managed solution: ${{ parameters.solutionName }}.zip"
+      Copy-Item -Path $managedZip -Destination "$stagingDir/${{ parameters.solutionName }}_$(SolutionVersion).zip"
+      Write-Host "Staged managed solution: ${{ parameters.solutionName }}_$(SolutionVersion).zip"
 
       # Copy all deployment settings from deploymentSettings/preDev/
       $preDev = "$(Build.SourcesDirectory)/deploymentSettings/preDev"
