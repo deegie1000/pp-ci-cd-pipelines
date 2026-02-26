@@ -639,33 +639,38 @@ steps:
         Write-Host "Solution: $name -> v$postVersion  (createNewPatch: $createNewPatch)"
         Write-Host "--------------------------------------------"
 
+        # ---------------------------------------------------------------
+        # Query Dataverse for this solution's id, friendly name, and
+        # parent. Both the createNewPatch and version-bump paths need
+        # this to handle the case where $name is itself a patch.
+        # ---------------------------------------------------------------
+        try {
+          $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename)"
+          $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
+          $solRecord  = $solResult.value[0]
+          $friendlyName = $solRecord.friendlyname
+          $solutionId   = $solRecord.solutionid
+          $isAPatch     = $solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename
+          if ($isAPatch) {
+            $parentUniqueName = $solRecord.parentsolutionid.uniquename
+            Write-Host "  '$name' is a patch — parent: '$parentUniqueName'"
+          } else {
+            $parentUniqueName = $name
+          }
+        } catch {
+          Write-Error "  Failed to query solution details for '$name': $($_.Exception.Message)"
+          $failedUpdates += $name
+          continue
+        }
+
         if ($createNewPatch) {
           # ===========================================================
           # Create a new patch from this solution at postExportVersion.
           # If this solution is itself a patch, Dataverse requires the
           # parent (base) solution as ParentSolutionUniqueName — you
           # cannot create a patch from a patch.
-          #
-          # Query Dataverse directly to determine the parent rather than
-          # relying on build.json flags, which may not be set on re-runs.
           # ===========================================================
           try {
-            # Query this solution's friendly name, id, and parent (if any) in one call
-            $solQuery = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename)"
-            $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
-            $solRecord  = $solResult.value[0]
-            $friendlyName = $solRecord.friendlyname
-            $solutionId   = $solRecord.solutionid
-
-            # If Dataverse returns a parent solution, this is itself a patch —
-            # CloneAsPatch must use the base solution, not this patch.
-            if ($solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename) {
-              $parentUniqueName = $solRecord.parentsolutionid.uniquename
-              Write-Host "  '$name' is a patch — using parent '$parentUniqueName' as CloneAsPatch source."
-            } else {
-              $parentUniqueName = $name
-            }
-
             Write-Host "  Creating new patch from '$parentUniqueName' (display name: '$friendlyName') at v$postVersion..."
             $cloneBody = @{
               ParentSolutionUniqueName = $parentUniqueName
@@ -681,7 +686,7 @@ steps:
             # with the "(DO NOT USE) " prefix so developers know to use
             # the newly created patch instead.
             # -----------------------------------------------------------
-            if ($solRecord.parentsolutionid -and $solRecord.parentsolutionid.uniquename) {
+            if ($isAPatch) {
               $prefix = "$(PatchDisplayNamePrefix)"
               if (-not $friendlyName.StartsWith($prefix)) {
                 $newDisplayName = "$prefix$friendlyName"
@@ -702,19 +707,27 @@ steps:
 
         } else {
           # ===========================================================
-          # Clone (version-bump) the solution to postExportVersion
+          # Bump the solution version to postExportVersion.
+          # If $name is a patch, bump the parent (base) solution instead
+          # so that the next development cycle starts from a fresh base
+          # version rather than the superseded patch.
           # ===========================================================
+          $targetName = $parentUniqueName
+          if ($isAPatch) {
+            Write-Host "  '$name' is a patch — bumping version on parent '$targetName' to v$postVersion..."
+          }
+
           pac solution online-version `
-            --solution-name $name `
+            --solution-name $targetName `
             --solution-version $postVersion
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "  Failed to set version for '$name'"
+            Write-Error "  Failed to set version for '$targetName'"
             $failedUpdates += $name
             continue
           }
 
-          Write-Host "  Version set to $postVersion."
+          Write-Host "  Version set to $postVersion on '$targetName'."
         }
       }
 

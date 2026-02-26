@@ -102,11 +102,12 @@ foreach ($exportFile in $exportFiles) {
     }
   }
 
-  # Ensure arrays exist
-  $rootEnvVars = @($rootSettings.EnvironmentVariables)
-  $rootConnRefs = @($rootSettings.ConnectionReferences)
-  $exportEnvVars = @($exportSettings.EnvironmentVariables)
-  $exportConnRefs = @($exportSettings.ConnectionReferences)
+  # Ensure arrays exist (guard against $null from ConvertFrom-Json when a property
+  # is missing or explicitly null — @($null) is unreliable across PS versions)
+  $rootEnvVars   = if ($rootSettings.EnvironmentVariables)   { @($rootSettings.EnvironmentVariables)   } else { @() }
+  $rootConnRefs  = if ($rootSettings.ConnectionReferences)   { @($rootSettings.ConnectionReferences)   } else { @() }
+  $exportEnvVars = if ($exportSettings.EnvironmentVariables) { @($exportSettings.EnvironmentVariables) } else { @() }
+  $exportConnRefs= if ($exportSettings.ConnectionReferences) { @($exportSettings.ConnectionReferences) } else { @() }
 
   # Merge
   $mergedEnvVars = Merge-SettingsArray -RootItems $rootEnvVars -ExportItems $exportEnvVars -KeyProperty "SchemaName"
