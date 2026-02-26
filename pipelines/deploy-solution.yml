@@ -19,8 +19,7 @@
 #                 solutions/managed/{solutionName}.zip through all stages.
 #
 # Prerequisites:
-#   1. Power Platform Build Tools extension installed in the ADO org
-#   2. ADO Environments created:
+#   1. ADO Environments created:
 #      - "Power Platform Dev"     (no approval check)
 #      - "Power Platform QA"      (with approval check)
 #      - "Power Platform Stage"   (with approval check)
@@ -96,10 +95,10 @@ stages:
                   condition: eq(variables['Build.Reason'], 'ResourceTrigger')
 
                 # ===============================================================
-                # Install Power Platform Build Tools
+                # Install pac CLI
                 # ===============================================================
-                - task: PowerPlatformToolInstaller@2
-                  displayName: "Install Power Platform Build Tools"
+                - pwsh: dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+                  displayName: "Install pac CLI"
 
                 # ===============================================================
                 # Authenticate pac CLI with Dev environment
