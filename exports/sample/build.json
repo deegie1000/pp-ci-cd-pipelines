@@ -10,14 +10,16 @@
       "name": "CustomConnectors",
       "version": "1.0.3.0",
       "postExportVersion": "1.0.4.0",
-      "createNewPatch": false
+      "createNewPatch": false,
+      "isExisting": false
     },
     {
       "name": "MainApp",
       "version": "2.1.0.0",
       "includeDeploymentSettings": true,
       "postExportVersion": "2.2.0.0",
-      "createNewPatch": false
+      "createNewPatch": false,
+      "isRollback": false
     }
   ],
   "configData": [

@@ -72,6 +72,7 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
 1. Detects a Git branch matching `export/{today's date}-{token}` (e.g., `export/2026-02-15-sprint42`)
 2. Reads `exports/{date-token}/build.json` on that branch for the list of solutions and their expected versions
 3. For each solution:
+   - If `isExisting: true`, uses the managed zip already in `solutions/managed/{name}_{version}.zip` and skips all export/unpack steps. Fails if the zip is not found.
    - Checks if a managed zip already exists for this name + version (cache check &mdash; skips if so)
    - Exports the **unmanaged** solution zip from Power Platform &rarr; `solutions/unmanaged/`
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
@@ -154,8 +155,8 @@ On-demand pipeline that exports a **single solution** from the **Pre-Dev** envir
 
 1. Authenticates pac CLI with the Pre-Dev environment using credentials from the `PowerPlatform-PreDev` variable group
 2. Exports the specified solution as **unmanaged** from Pre-Dev using `pac solution export` &rarr; `solutions/unmanaged/{name}.zip`
-3. Performs a **clean unpack** using `pac solution unpack` (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/{name}/`
-4. Exports the **managed** solution directly from Pre-Dev using `pac solution export --managed` &rarr; `solutions/managed/{name}.zip`
+3. Performs a **clean unpack** using `pac solution unpack` (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/{name}/`; reads the version from `Other/Solution.xml` and renames the unmanaged zip to `{name}_{version}.zip`
+4. Exports the **managed** solution directly from Pre-Dev using `pac solution export --managed` &rarr; `solutions/managed/{name}_{version}.zip`
 5. Creates a timestamped branch `export/predev/{yyyy-MM-dd-HHmmss}`, commits the solution files, and pushes to that branch
 6. Creates a Pull Request from the export branch to `main`, sets auto-complete (squash merge), and deletes the source branch
 7. Publishes the managed zip and **all** `deploymentSettings_*.json` files from `deploymentSettings/preDev/` as a pipeline artifact
@@ -176,7 +177,7 @@ Multi-stage pipeline that deploys a single managed solution through all environm
 1. Downloads the managed solution artifact (Dev downloads from the export pipeline; QA/Stage/Prod download from the Dev stage's published artifact)
 2. Authenticates with the target environment using credentials from a per-environment variable group
 3. Checks for `deploymentSettings_{stage}.json` &mdash; in the artifact (Dev, auto-triggered) or in `deploymentSettings/preDev/` folder (Dev manual, and all downstream stages)
-4. Imports the managed solution, applying deployment settings if found
+4. Imports the managed solution, applying deployment settings if found. If `build.json` is present in the artifact and the solution has `isRollback: true`, `--skip-lower-version` is omitted so a lower version can overwrite a higher one
 5. **Upserts configuration data** &mdash; if `build.json` is present in the artifact and contains `configData`, PATCHes each record into the target environment. See [Configuration Data](#configuration-data)
 
 **Stages:**
@@ -318,6 +319,8 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions[].postExportVersion` | Optional string. If set, the export pipeline bumps this solution's version in Dev to the specified version after export. See [Post-Export Version Management](#post-export-version-management). |
 | `solutions[].createNewPatch` | Optional boolean (default: `false`). Only used when `postExportVersion` is set. If `true`, a new patch is cloned from this solution at `postExportVersion` via the Dataverse `CloneAsPatch` action. If `false`, the solution's version is updated directly via `pac solution online-version`. |
 | `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
+| `solutions[].isExisting` | Optional boolean (default: `false`). If `true`, the export pipeline skips exporting this solution from Power Platform and uses the managed zip already present in `solutions/managed/{name}_{version}.zip`. Use this when the zip is already committed to the repo and no re-export is needed. The pipeline fails if the zip is not found. |
+| `solutions[].isRollback` | Optional boolean (default: `false`). If `true`, the deploy pipelines omit `--skip-lower-version` when importing this solution, allowing a lower (rollback) version to be installed over a higher one. Applies to all stages (Dev, QA, Stage, Prod). |
 
 ### Config Data Fields
 

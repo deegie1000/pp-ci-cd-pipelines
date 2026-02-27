@@ -208,7 +208,30 @@ stages:
                     $solutionName = "$(SolutionName)"
                     $solutionZip  = "$(SolutionZipPath)"
 
-                    Write-Host "Checking solution: $solutionName"
+                    # Strip version suffix from filename to get base solution name
+                    # e.g., "MySolution_1.2.3.4" → "MySolution"
+                    $baseSolutionName = $solutionName -replace '_\d+\.\d+\.\d+\.\d+$', ''
+
+                    # Read isRollback from build.json if available
+                    $isRollback = $false
+                    $buildJsonPath = "$(Pipeline.Workspace)/exportSolution/ManagedSolution/build.json"
+                    if (Test-Path $buildJsonPath) {
+                      try {
+                        $buildConfig   = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+                        $solutionEntry = $buildConfig.solutions | Where-Object { $_.name -eq $baseSolutionName } | Select-Object -First 1
+                        if ($solutionEntry -and $solutionEntry.PSObject.Properties['isRollback']) {
+                          $isRollback = [bool]$solutionEntry.isRollback
+                        }
+                      } catch {
+                        Write-Host "##vso[task.logissue type=warning]Could not read build.json for isRollback flag: $_"
+                      }
+                    }
+
+                    if ($isRollback) {
+                      Write-Host "isRollback = true — skip-lower-version will NOT be used on import."
+                    }
+
+                    Write-Host "Checking solution: $baseSolutionName"
 
                     # -----------------------------------------------------------
                     # Extract target version from the solution zip
@@ -256,14 +279,14 @@ stages:
                           if ($key) { $installedMap[$key] = $ver }
                         }
 
-                        if ($installedMap.ContainsKey($solutionName)) {
-                          $installedVersion = $installedMap[$solutionName]
+                        if ($installedMap.ContainsKey($baseSolutionName)) {
+                          $installedVersion = $installedMap[$baseSolutionName]
                           if ($installedVersion -eq $targetVersion) {
                             Write-Host ""
                             Write-Host "============================================"
                             Write-Host "  Already at target version — skipping"
                             Write-Host "============================================"
-                            Write-Host "Solution '$solutionName' is already at v$targetVersion in Dev."
+                            Write-Host "Solution '$baseSolutionName' is already at v$targetVersion in Dev."
                             exit 0
                           }
                           Write-Host "Installed: v$installedVersion — will upgrade to v$targetVersion"
@@ -278,7 +301,7 @@ stages:
 
                     Write-Host ""
                     Write-Host "============================================"
-                    Write-Host "  Deploying to Dev: $solutionName"
+                    Write-Host "  Deploying to Dev: $baseSolutionName"
                     Write-Host "  Solution zip:     $solutionZip"
                     Write-Host "============================================"
 
@@ -294,7 +317,9 @@ stages:
                     if ($isInstalled) {
                       # Upgrading an existing solution — use staged upgrade
                       $importArgs += "--stage-and-upgrade"
-                      $importArgs += "--skip-lower-version"
+                      if (-not $isRollback) {
+                        $importArgs += "--skip-lower-version"
+                      }
                       $importArgs += "--async"
                       $importArgs += "--max-async-wait-time"
                       $importArgs += "60"
@@ -308,7 +333,7 @@ stages:
                     & pac @importArgs
 
                     if ($LASTEXITCODE -ne 0) {
-                      Write-Error "Failed to import solution: $solutionName"
+                      Write-Error "Failed to import solution: $baseSolutionName"
                       exit 1
                     }
 
@@ -316,7 +341,7 @@ stages:
                     Write-Host "============================================"
                     Write-Host "  Deployment Complete"
                     Write-Host "============================================"
-                    Write-Host "Solution '$solutionName' has been imported"
+                    Write-Host "Solution '$baseSolutionName' has been imported"
                     Write-Host "into the Dev environment as managed."
                     Write-Host ""
                     Write-Host "Verify in the Power Platform Admin Center or"

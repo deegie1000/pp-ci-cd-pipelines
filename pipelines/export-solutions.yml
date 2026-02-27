@@ -272,6 +272,23 @@ steps:
         Write-Host "============================================"
 
         # -----------------------------------------------------------------
+        # isExisting: skip export/unpack and use pre-existing managed zip
+        # -----------------------------------------------------------------
+        if ($solution.isExisting -eq $true) {
+          $existingManagedZip = Join-Path $managedDir "${name}_${version}.zip"
+          Write-Host "  isExisting = true — using pre-existing managed zip."
+          if (-not (Test-Path $existingManagedZip)) {
+            Write-Error "  isExisting is true but managed zip not found: $existingManagedZip"
+            $failedSolutions += $name
+            continue
+          }
+          Copy-Item -Path $existingManagedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
+          Write-Host "  Staged existing managed zip for artifact publishing."
+          Write-Host "`n  Solution '$name' (v$version) — skipped export (isExisting=true)."
+          continue
+        }
+
+        # -----------------------------------------------------------------
         # Check if managed zip already exists for this name + version
         # -----------------------------------------------------------------
         $existingManagedZip = Join-Path $managedDir "${name}_${version}.zip"
