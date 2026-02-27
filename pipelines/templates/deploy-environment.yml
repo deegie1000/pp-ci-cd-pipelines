@@ -297,19 +297,13 @@ stages:
                       $importArgs = @(
                         "solution", "import",
                         "--path", $zipPath,
-                        "--activate-plugins"
+                        "--activate-plugins",
+                        "--async",
+                        "--max-async-wait-time", "60"
                       )
                       if ($isUpgrade -and -not $isRollback) {
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
-                        $importArgs += "--async"
-                        $importArgs += "--max-async-wait-time"
-                        $importArgs += "60"
-                      } elseif ($isUpgrade -and $isRollback) {
-                        # Rolling back — plain import without version guard, but still async
-                        $importArgs += "--async"
-                        $importArgs += "--max-async-wait-time"
-                        $importArgs += "60"
                       }
 
                       $includeSettings = $false
