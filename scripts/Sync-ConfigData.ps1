@@ -163,9 +163,26 @@ foreach ($dataset in $ConfigData) {
             $patchBody = $body | ConvertTo-Json -Depth 5 -Compress
 
             try {
-                # PATCH with If-Match: * would only update; without If-Match it upserts
-                Invoke-RestMethod -Uri $patchUrl -Method Patch -Headers $ApiHeaders -Body $patchBody | Out-Null
-                $upsertedCount++
+                # PATCH without If-Match performs a true upsert (create or update by GUID).
+                # Some Dataverse environments return 404 for PATCH when the record doesn't
+                # exist yet; in that case fall back to POST with the primary key in the body.
+                try {
+                    Invoke-RestMethod -Uri $patchUrl -Method Patch -Headers $ApiHeaders -Body $patchBody | Out-Null
+                    $upsertedCount++
+                } catch {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                    if ($statusCode -eq 404) {
+                        # Record does not exist — create it via POST with explicit GUID
+                        $createBody = $body.Clone()
+                        $createBody[$primaryKey] = $guid
+                        $createBodyJson = $createBody | ConvertTo-Json -Depth 5 -Compress
+                        $postUrl = "$envUrl/api/data/v9.2/$entity"
+                        Invoke-RestMethod -Uri $postUrl -Method Post -Headers $ApiHeaders -Body $createBodyJson | Out-Null
+                        $upsertedCount++
+                    } else {
+                        throw
+                    }
+                }
             } catch {
                 $statusCode = $_.Exception.Response.StatusCode.value__
                 Write-Host "##vso[task.logissue type=warning]Failed to upsert record $guid in '$name' (HTTP $statusCode): $($_.Exception.Message)"
