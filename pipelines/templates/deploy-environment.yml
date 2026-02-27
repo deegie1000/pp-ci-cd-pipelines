@@ -239,6 +239,15 @@ stages:
                       Write-Host "  Solution: $name (v$version)"
                       Write-Host "============================================"
 
+                      # Read isRollback flag from build.json solution entry
+                      $isRollback = $false
+                      if ($solution.PSObject.Properties['isRollback']) {
+                        $isRollback = [bool]$solution.isRollback
+                      }
+                      if ($isRollback) {
+                        Write-Host "  isRollback = true — staged upgrade will NOT be used; importing without version guard to allow lower version."
+                      }
+
                       # Check if already installed at this version
                       $isUpgrade = $false
                       if ($installed.ContainsKey($name)) {
@@ -248,7 +257,23 @@ stages:
                           $skippedSolutions += $name
                           continue
                         }
-                        Write-Host "  Currently installed: v$installedVersion — upgrading to v$version"
+
+                        # Compare versions: if installed is higher and this is not a rollback, skip
+                        try {
+                          if (([Version]$installedVersion) -gt ([Version]$version) -and -not $isRollback) {
+                            Write-Host "  Installed v$installedVersion is higher than target v$version — skipping (not a rollback)."
+                            $skippedSolutions += $name
+                            continue
+                          }
+                        } catch {
+                          Write-Host "##vso[task.logissue type=warning]Could not compare versions '$installedVersion' and '$version' — proceeding with import."
+                        }
+
+                        if ($isRollback) {
+                          Write-Host "  Currently installed: v$installedVersion — rolling back to v$version (isRollback=true)"
+                        } else {
+                          Write-Host "  Currently installed: v$installedVersion — upgrading to v$version"
+                        }
                         $isUpgrade = $true
                       } else {
                         Write-Host "  Not currently installed — fresh install"
@@ -264,7 +289,7 @@ stages:
                         "--path", $zipPath,
                         "--activate-plugins"
                       )
-                      if ($isUpgrade) {
+                      if ($isUpgrade -and -not $isRollback) {
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
                         $importArgs += "--async"

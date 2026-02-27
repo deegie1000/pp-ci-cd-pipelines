@@ -121,7 +121,7 @@ stages:
                     }
 
                     if ($isRollback) {
-                      Write-Host "isRollback = true — skip-lower-version will NOT be used on import."
+                      Write-Host "isRollback = true — staged upgrade will NOT be used; importing without version guard to allow lower version."
                     }
 
                     Write-Host "Checking solution: $baseSolutionName"
@@ -182,7 +182,11 @@ stages:
                             Write-Host "Solution '$baseSolutionName' is already at v$targetVersion in ${{ parameters.stageName }}."
                             exit 0
                           }
-                          Write-Host "Installed: v$installedVersion — will upgrade to v$targetVersion"
+                          if ($isRollback) {
+                            Write-Host "Installed: v$installedVersion — rolling back to v$targetVersion (isRollback=true)"
+                          } else {
+                            Write-Host "Installed: v$installedVersion — will upgrade to v$targetVersion"
+                          }
                           $isInstalled = $true
                         } else {
                           Write-Host "Solution not currently installed — fresh install."
@@ -212,12 +216,10 @@ stages:
                       "--activate-plugins"
                     )
 
-                    if ($isInstalled) {
+                    if ($isInstalled -and -not $isRollback) {
                       # Upgrading an existing solution — use staged upgrade
                       $importArgs += "--stage-and-upgrade"
-                      if (-not $isRollback) {
-                        $importArgs += "--skip-lower-version"
-                      }
+                      $importArgs += "--skip-lower-version"
                       $importArgs += "--async"
                       $importArgs += "--max-async-wait-time"
                       $importArgs += "60"

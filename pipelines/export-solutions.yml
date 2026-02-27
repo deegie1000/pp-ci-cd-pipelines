@@ -511,6 +511,10 @@ steps:
         exit 1
       }
 
+      # Signal that there are solutions ready to deploy (even if no source file changes)
+      # Used by the commit step to create an empty commit for isExisting/isRollback runs.
+      Write-Host "##vso[task.setvariable variable=HasSolutionsToDeploy]true"
+
       # Update SolutionsList variable with cloud flow flags for downstream steps
       $solutionsJson = @($solutions) | ConvertTo-Json -Compress
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
@@ -639,8 +643,24 @@ steps:
       $status = git status --porcelain solutions/ deploymentSettings/ configData/ "exports/$(ExportSubfolder)/build.json"
       if (-not $status) {
         Write-Host "No changes detected in solutions/, deploymentSettings/, configData/, or build.json."
-        Write-Host "##vso[task.setvariable variable=HasChanges]false"
-        exit 0
+
+        # If there are solutions to deploy (e.g., isExisting or isRollback with no source delta),
+        # create an empty commit so a PR can be opened and the deployment pipeline is triggered.
+        if ($env:HasSolutionsToDeploy -eq "true") {
+          Write-Host "Solutions to deploy (isExisting/isRollback) — creating empty commit to trigger deployment PR."
+          $commitMsg = "chore: trigger deployment for [$(ExportSubfolder)] (no source changes)"
+          git commit --allow-empty -m "$commitMsg"
+          git push origin "$(ExportBranch)"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to push empty commit to $(ExportBranch)"
+            exit 1
+          }
+          Write-Host "##vso[task.setvariable variable=HasChanges]true"
+          Write-Host "Empty commit pushed to $(ExportBranch)"
+        } else {
+          Write-Host "##vso[task.setvariable variable=HasChanges]false"
+          exit 0
+        }
       }
 
       Write-Host "Changes detected:"
