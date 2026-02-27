@@ -31,10 +31,7 @@ resources:
   pipelines:
     - pipeline: ExportPipeline
       source: "export-solutions"
-      trigger:
-        branches:
-          include:
-            - main
+      trigger: true
 
 pool:
   vmImage: "windows-latest"
