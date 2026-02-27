@@ -25,12 +25,6 @@
 #      "ManagedSolutions" containing build.json and *_version.zip files
 # =============================================================================
 
-parameters:
-  - name: dryRun
-    displayName: "Dry run (validate only — no imports, no config data upserts)"
-    type: boolean
-    default: false
-
 trigger: none
 
 resources:
@@ -45,6 +39,12 @@ resources:
 pool:
   vmImage: "windows-latest"
 
+# Set dryRun to "true" in the Variables section of the Run pipeline dialog
+# to validate without importing any solutions or upserting config data.
+variables:
+  - name: dryRun
+    value: "false"
+
 stages:
   # ===========================================================================
   # QA — Deploys automatically when the export pipeline completes
@@ -55,7 +55,6 @@ stages:
       displayName: "Deploy to QA"
       environmentName: "Power Platform QA"
       variableGroup: "PowerPlatform-QA"
-      dryRun: ${{ parameters.dryRun }}
 
   # ===========================================================================
   # Stage — Requires manual approval (configure on the ADO environment)
@@ -67,7 +66,6 @@ stages:
       environmentName: "Power Platform Stage"
       variableGroup: "PowerPlatform-Stage"
       dependsOn: QA
-      dryRun: ${{ parameters.dryRun }}
 
   # ===========================================================================
   # Prod — Requires manual approval (configure on the ADO environment)
@@ -79,4 +77,3 @@ stages:
       environmentName: "Power Platform Prod"
       variableGroup: "PowerPlatform-Prod"
       dependsOn: Stage
-      dryRun: ${{ parameters.dryRun }}

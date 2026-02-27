@@ -141,11 +141,11 @@ Stage and Prod approvals are controlled by **ADO Environment approval checks** (
 
 **Trigger:** Automatic &mdash; runs when the `export-solutions` pipeline completes on the `main` branch.
 
-**Parameters (manual runs):**
+**Variables (manual runs):**
 
-| Parameter | Default | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `dryRun` | `false` | When `true`, authenticates, validates all artifacts, queries installed solution versions, and logs exactly what *would* be imported — but performs no imports and no config data upserts. Safe to run at any time against any environment. |
+| `dryRun` | `"false"` | Set to `"true"` in the Variables section of the Run pipeline dialog to validate without importing any solutions or upserting config data. Safe to run at any time against any environment. |
 
 **Auth:** Uses pac CLI with credentials from variable groups (`PowerPlatform-QA`, `PowerPlatform-Stage`, `PowerPlatform-Prod`).
 
@@ -817,7 +817,7 @@ The pipeline will skip any solution already installed at the target version in t
 To validate what *would* be deployed without making any changes:
 
 1. Go to **Pipelines** > select `release-solutions` > **Run pipeline**
-2. Check the **Dry run** checkbox
+2. Expand **Variables** and set `dryRun` to `true`
 3. Click **Run**
 
 The pipeline authenticates with each environment, validates all artifacts, queries currently installed solution versions, and logs the exact `pac solution import` command that *would* be run for each solution — but no imports are executed and no config data is upserted.
