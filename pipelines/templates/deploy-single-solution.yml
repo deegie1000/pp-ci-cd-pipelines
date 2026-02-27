@@ -140,31 +140,16 @@ stages:
                     Write-Host "Checking solution: $baseSolutionName"
 
                     # -----------------------------------------------------------
-                    # Extract target version from the solution zip
+                    # Extract target version from the zip filename
+                    # e.g., "MySolution_1.2.3.4" → "1.2.3.4"
                     # -----------------------------------------------------------
                     $targetVersion = $null
-                    try {
-                      Add-Type -Assembly System.IO.Compression.FileSystem
-                      $zip = [System.IO.Compression.ZipFile]::OpenRead($solutionZip)
-                      try {
-                        $entry = $zip.Entries | Where-Object { $_.FullName -eq "Other/Solution.xml" } | Select-Object -First 1
-                        if ($entry) {
-                          $reader = [System.IO.StreamReader]::new($entry.Open())
-                          $solutionXml = [xml]$reader.ReadToEnd()
-                          $reader.Dispose()
-                          $targetVersion = $solutionXml.ImportExportXml.SolutionManifest.Version
-                        }
-                      } finally {
-                        $zip.Dispose()
-                      }
-                    } catch {
-                      Write-Host "##vso[task.logissue type=warning]Could not read solution version from zip: $_"
-                    }
-
-                    if ($targetVersion) {
+                    $versionMatch = [System.Text.RegularExpressions.Regex]::Match($solutionName, '_(\d+\.\d+\.\d+\.\d+)$')
+                    if ($versionMatch.Success) {
+                      $targetVersion = $versionMatch.Groups[1].Value
                       Write-Host "Target version: $targetVersion"
                     } else {
-                      Write-Host "Could not determine target version — proceeding with import."
+                      Write-Host "Could not determine target version from filename — proceeding with import."
                     }
 
                     # -----------------------------------------------------------
