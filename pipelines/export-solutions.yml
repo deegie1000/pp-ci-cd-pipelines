@@ -885,6 +885,12 @@ steps:
           continue
         }
 
+        if ($solution.isExisting -eq $true -or $solution.isRollback -eq $true) {
+          $reason = if ($solution.isExisting -eq $true) { "isExisting=true" } else { "isRollback=true" }
+          Write-Host "Skipping '$name' — version management skipped ($reason)."
+          continue
+        }
+
         $postVersion    = $solution.postExportVersion
         $createNewPatch = $false
         if ($solution.PSObject.Properties["createNewPatch"]) {
