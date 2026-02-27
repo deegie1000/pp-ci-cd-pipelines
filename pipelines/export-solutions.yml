@@ -657,6 +657,7 @@ steps:
           }
           Write-Host "##vso[task.setvariable variable=HasChanges]true"
           Write-Host "Empty commit pushed to $(ExportBranch)"
+          exit 0
         } else {
           Write-Host "##vso[task.setvariable variable=HasChanges]false"
           exit 0

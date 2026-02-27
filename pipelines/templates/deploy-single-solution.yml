@@ -20,6 +20,9 @@ parameters:
   - name: dependsOn
     type: string
     default: ""
+  - name: dryRun
+    type: boolean
+    default: false
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -86,6 +89,16 @@ stages:
                 # ===============================================================
                 - pwsh: |
                     $ErrorActionPreference = "Stop"
+
+                    $dryRun = "${{ parameters.dryRun }}" -eq "True"
+
+                    if ($dryRun) {
+                      Write-Host ""
+                      Write-Host "============================================"
+                      Write-Host "  DRY RUN MODE — no changes will be made"
+                      Write-Host "============================================"
+                      Write-Host ""
+                    }
 
                     # -----------------------------------------------------------
                     # Resolve solution zip from the artifact
@@ -182,6 +195,15 @@ stages:
                             Write-Host "Solution '$baseSolutionName' is already at v$targetVersion in ${{ parameters.stageName }}."
                             exit 0
                           }
+                          # Skip if installed is higher and this is not a rollback
+                          try {
+                            if (([Version]$installedVersion) -gt ([Version]$targetVersion) -and -not $isRollback) {
+                              Write-Host "Installed v$installedVersion is higher than target v$targetVersion — skipping (not a rollback)."
+                              exit 0
+                            }
+                          } catch {
+                            Write-Host "##vso[task.logissue type=warning]Could not compare versions — proceeding with import."
+                          }
                           if ($isRollback) {
                             Write-Host "Installed: v$installedVersion — rolling back to v$targetVersion (isRollback=true)"
                           } else {
@@ -223,6 +245,11 @@ stages:
                       $importArgs += "--async"
                       $importArgs += "--max-async-wait-time"
                       $importArgs += "60"
+                    } elseif ($isInstalled -and $isRollback) {
+                      # Rolling back — plain import without version guard, but still async
+                      $importArgs += "--async"
+                      $importArgs += "--max-async-wait-time"
+                      $importArgs += "60"
                     }
 
                     if (Test-Path $settingsPath) {
@@ -233,25 +260,37 @@ stages:
                     }
 
                     # -----------------------------------------------------------
-                    # Import
+                    # Import (skipped in dry run)
                     # -----------------------------------------------------------
-                    & pac @importArgs
+                    if ($dryRun) {
+                      Write-Host "[DRY RUN] Would execute: pac $($importArgs -join ' ')"
+                    } else {
+                      & pac @importArgs
 
-                    if ($LASTEXITCODE -ne 0) {
-                      Write-Error "Failed to import solution: $baseSolutionName"
-                      exit 1
+                      if ($LASTEXITCODE -ne 0) {
+                        Write-Error "Failed to import solution: $baseSolutionName"
+                        exit 1
+                      }
                     }
 
                     Write-Host ""
                     Write-Host "============================================"
-                    Write-Host "  Deployment Complete"
+                    if ($dryRun) {
+                      Write-Host "  DRY RUN Complete"
+                    } else {
+                      Write-Host "  Deployment Complete"
+                    }
                     Write-Host "============================================"
-                    Write-Host "Solution '$baseSolutionName' has been imported"
-                    Write-Host "into the ${{ parameters.stageName }} environment as managed."
-                    Write-Host ""
-                    Write-Host "Verify in the Power Platform Admin Center or"
-                    Write-Host "maker portal that the solution is present and"
-                    Write-Host "functioning as expected."
+                    if ($dryRun) {
+                      Write-Host "[DRY RUN] Would import '$baseSolutionName' into the ${{ parameters.stageName }} environment."
+                    } else {
+                      Write-Host "Solution '$baseSolutionName' has been imported"
+                      Write-Host "into the ${{ parameters.stageName }} environment as managed."
+                      Write-Host ""
+                      Write-Host "Verify in the Power Platform Admin Center or"
+                      Write-Host "maker portal that the solution is present and"
+                      Write-Host "functioning as expected."
+                    }
                   displayName: "Import managed solution to ${{ parameters.stageName }}"
                   env:
                     ClientSecret: $(ClientSecret)
@@ -261,6 +300,12 @@ stages:
                 # ===============================================================
                 - pwsh: |
                     $ErrorActionPreference = "Stop"
+
+                    $dryRun = "${{ parameters.dryRun }}" -eq "True"
+                    if ($dryRun) {
+                      Write-Host "[DRY RUN] Skipping config data upsert."
+                      exit 0
+                    }
 
                     $artifactDir = "$(Pipeline.Workspace)/DeploySolution"
                     $buildJsonPath = Join-Path $artifactDir "build.json"

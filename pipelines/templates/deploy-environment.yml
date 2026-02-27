@@ -20,6 +20,9 @@ parameters:
   - name: dependsOn
     type: string
     default: ""
+  - name: dryRun
+    type: boolean
+    default: false
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -92,6 +95,16 @@ stages:
                 # ===============================================================
                 - pwsh: |
                     $ErrorActionPreference = "Stop"
+
+                    $dryRun = "${{ parameters.dryRun }}" -eq "True"
+
+                    if ($dryRun) {
+                      Write-Host ""
+                      Write-Host "============================================"
+                      Write-Host "  DRY RUN MODE — no changes will be made"
+                      Write-Host "============================================"
+                      Write-Host ""
+                    }
 
                     # -----------------------------------------------------------
                     # Read build.json from artifact
@@ -295,6 +308,11 @@ stages:
                         $importArgs += "--async"
                         $importArgs += "--max-async-wait-time"
                         $importArgs += "60"
+                      } elseif ($isUpgrade -and $isRollback) {
+                        # Rolling back — plain import without version guard, but still async
+                        $importArgs += "--async"
+                        $importArgs += "--max-async-wait-time"
+                        $importArgs += "60"
                       }
 
                       $includeSettings = $false
@@ -308,16 +326,21 @@ stages:
                         $importArgs += @("--settings-file", $settingsFile)
                       }
 
-                      & pac @importArgs
+                      if ($dryRun) {
+                        Write-Host "  [DRY RUN] Would execute: pac $($importArgs -join ' ')"
+                        $deployedSolutions += $name
+                      } else {
+                        & pac @importArgs
 
-                      if ($LASTEXITCODE -ne 0) {
-                        Write-Error "Failed to import solution: $name"
-                        $failedSolutions += $name
-                        continue
+                        if ($LASTEXITCODE -ne 0) {
+                          Write-Error "Failed to import solution: $name"
+                          $failedSolutions += $name
+                          continue
+                        }
+
+                        Write-Host "  Successfully deployed."
+                        $deployedSolutions += $name
                       }
-
-                      Write-Host "  Successfully deployed."
-                      $deployedSolutions += $name
 
                       # ---------------------------------------------------------
                       # Activate cloud flows if this solution includes them
@@ -327,7 +350,7 @@ stages:
                         $hasCloudFlows = [bool]$solution.includesCloudFlows
                       }
 
-                      if ($hasCloudFlows -and $hasApiToken) {
+                      if ($hasCloudFlows -and $hasApiToken -and -not $dryRun) {
                         Write-Host "  Checking cloud flow statuses..."
                         $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
 
@@ -397,10 +420,19 @@ stages:
                     # -----------------------------------------------------------
                     Write-Host ""
                     Write-Host "============================================"
-                    Write-Host "  Deployment Summary — ${{ parameters.stageName }}"
+                    if ($dryRun) {
+                      Write-Host "  DRY RUN Summary — ${{ parameters.stageName }}"
+                    } else {
+                      Write-Host "  Deployment Summary — ${{ parameters.stageName }}"
+                    }
                     Write-Host "============================================"
+                    if ($dryRun) { Write-Host "  Mode: DRY RUN — no imports were performed" }
                     Write-Host "Total solutions: $($solutions.Count)"
-                    Write-Host "Deployed:        $($deployedSolutions.Count)"
+                    if ($dryRun) {
+                      Write-Host "Would deploy:    $($deployedSolutions.Count)"
+                    } else {
+                      Write-Host "Deployed:        $($deployedSolutions.Count)"
+                    }
                     Write-Host "Skipped:         $($skippedSolutions.Count)"
                     Write-Host "Failed:          $($failedSolutions.Count)"
 
@@ -432,6 +464,12 @@ stages:
                 # ===============================================================
                 - pwsh: |
                     $ErrorActionPreference = "Stop"
+
+                    $dryRun = "${{ parameters.dryRun }}" -eq "True"
+                    if ($dryRun) {
+                      Write-Host "[DRY RUN] Skipping config data upsert."
+                      exit 0
+                    }
 
                     $artifactDir = "$(Pipeline.Workspace)/ExportPipeline/ManagedSolutions"
                     $buildJsonPath = Join-Path $artifactDir "build.json"

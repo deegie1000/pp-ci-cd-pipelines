@@ -141,6 +141,12 @@ Stage and Prod approvals are controlled by **ADO Environment approval checks** (
 
 **Trigger:** Automatic &mdash; runs when the `export-solutions` pipeline completes on the `main` branch.
 
+**Parameters (manual runs):**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `dryRun` | `false` | When `true`, authenticates, validates all artifacts, queries installed solution versions, and logs exactly what *would* be imported — but performs no imports and no config data upserts. Safe to run at any time against any environment. |
+
 **Auth:** Uses pac CLI with credentials from variable groups (`PowerPlatform-QA`, `PowerPlatform-Stage`, `PowerPlatform-Prod`).
 
 **Template:** Uses `pipelines/templates/deploy-environment.yml` for each stage to keep the logic DRY.
@@ -195,9 +201,10 @@ QA, Stage, and Prod approvals are controlled by **ADO Environment approval check
 
 **Parameters (manual runs):**
 
-| Parameter | Description |
-|---|---|
-| `solutionName` | The solution's unique name as it appears in Power Platform. Required for manual runs; ignored for auto-triggered runs. |
+| Parameter | Default | Description |
+|---|---|---|
+| `solutionName` | `""` | The solution's unique name as it appears in Power Platform. Required for manual runs; ignored for auto-triggered runs. |
+| `dryRun` | `false` | When `true`, authenticates, queries installed solution versions, and logs exactly what *would* be imported at each stage — but performs no imports and no config data upserts. |
 
 **Auth:** Uses pac CLI with credentials from variable groups (`PowerPlatform-Dev`, `PowerPlatform-QA`, `PowerPlatform-Stage`, `PowerPlatform-Prod`).
 
@@ -805,6 +812,16 @@ The release pipeline triggers automatically after the export pipeline completes.
 
 The pipeline will skip any solution already installed at the target version in the environment.
 
+**Dry run:**
+
+To validate what *would* be deployed without making any changes:
+
+1. Go to **Pipelines** > select `release-solutions` > **Run pipeline**
+2. Check the **Dry run** checkbox
+3. Click **Run**
+
+The pipeline authenticates with each environment, validates all artifacts, queries currently installed solution versions, and logs the exact `pac solution import` command that *would* be run for each solution — but no imports are executed and no config data is upserted.
+
 ### Export from Pre-Dev + Deploy (On-Demand)
 
 1. Go to **Pipelines** in your ADO project
@@ -832,6 +849,8 @@ If you need to re-deploy a solution that's already been exported and committed:
 4. Click **Run**
 
 The solution will deploy through all four stages (Dev &rarr; QA &rarr; Stage &rarr; Prod), pausing at QA, Stage, and Prod for approval.
+
+**Dry run:** Check the **Dry run** checkbox when running the pipeline manually to validate version checks and import arguments at every stage without making any changes.
 
 ### Verifying Results
 

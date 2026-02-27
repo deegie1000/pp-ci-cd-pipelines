@@ -25,6 +25,12 @@
 #      "ManagedSolutions" containing build.json and *_version.zip files
 # =============================================================================
 
+parameters:
+  - name: dryRun
+    displayName: "Dry run (validate only — no imports, no config data upserts)"
+    type: boolean
+    default: false
+
 trigger: none
 
 resources:
@@ -49,6 +55,7 @@ stages:
       displayName: "Deploy to QA"
       environmentName: "Power Platform QA"
       variableGroup: "PowerPlatform-QA"
+      dryRun: ${{ parameters.dryRun }}
 
   # ===========================================================================
   # Stage — Requires manual approval (configure on the ADO environment)
@@ -60,6 +67,7 @@ stages:
       environmentName: "Power Platform Stage"
       variableGroup: "PowerPlatform-Stage"
       dependsOn: QA
+      dryRun: ${{ parameters.dryRun }}
 
   # ===========================================================================
   # Prod — Requires manual approval (configure on the ADO environment)
@@ -71,3 +79,4 @@ stages:
       environmentName: "Power Platform Prod"
       variableGroup: "PowerPlatform-Prod"
       dependsOn: Stage
+      dryRun: ${{ parameters.dryRun }}
