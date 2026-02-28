@@ -1,0 +1,675 @@
+# =============================================================================
+# Pipeline: Export Power Platform Solutions for New Dev Environment
+# =============================================================================
+# Manually triggered. Checks out a specified export branch, exports solutions
+# from Dev (respecting isUnmanaged per solution), extracts config data, commits
+# back to the export branch, opens a PR to main, and publishes a
+# "NewDevSolutions" artifact consumed by deploy-to-newdev.yml.
+#
+# Branch naming convention: export/yyyy-MM-dd-{token}
+# Configuration file:       exports/{yyyy-MM-dd-token}/build.json
+#
+# Prerequisites:
+#   1. Power Platform Build Tools extension installed in the ADO org
+#   2. A Power Platform service connection named in the variable below
+#   3. A variable group named "PowerPlatform-Dev" with:
+#      - EnvironmentUrl  : Power Platform Dev environment URL
+#      - ClientId        : Service Principal Application (Client) ID
+#      - ClientSecret    : Service Principal Client Secret (mark as secret)
+#      - TenantId        : Azure AD Tenant ID
+#   4. Build Service account has "Contribute" and "Create Pull Request"
+#      permissions on the repository
+# =============================================================================
+
+trigger: none
+
+# -----------------------------------------------------------------------------
+# Parameters: Required in the ADO UI when running manually
+# -----------------------------------------------------------------------------
+parameters:
+  - name: exportBranch
+    displayName: "Export branch containing build.json (e.g. export/2026-02-28-sprint42)"
+    type: string
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  - group: PowerPlatform-Dev
+
+  - name: PowerPlatformServiceConnection
+    value: "PowerPlatformDev"
+
+  - name: PatchDisplayNamePrefix
+    value: "(DO NOT USE) "
+
+pool:
+  vmImage: "windows-latest"
+
+steps:
+  # ===========================================================================
+  # Step 1: Checkout repository with full history and persist credentials
+  # ===========================================================================
+  - checkout: self
+    persistCredentials: true
+    fetchDepth: 0
+
+  # ===========================================================================
+  # Step 2: Install Power Platform Build Tools
+  # ===========================================================================
+  - task: PowerPlatformToolInstaller@2
+    displayName: "Install Power Platform Build Tools"
+
+  # ===========================================================================
+  # Step 3: Install pac CLI
+  # ===========================================================================
+  - pwsh: dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+    displayName: "Install pac CLI"
+
+  # ===========================================================================
+  # Step 4: Checkout the export branch and set pipeline variables
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $exportBranch = "${{ parameters.exportBranch }}"
+
+      # Record the pipeline branch HEAD before switching, so scripts/ can be
+      # restored afterward (export branch may have an older copy of scripts/).
+      $pipelineHead = git rev-parse HEAD
+      Write-Host "Pipeline HEAD: $pipelineHead"
+
+      Write-Host "Fetching export branch: $exportBranch"
+      git fetch origin "$exportBranch"
+
+      Write-Host "Checking out: $exportBranch"
+      git checkout "$exportBranch"
+      git pull origin "$exportBranch"
+
+      # Restore scripts/ from the pipeline branch so we always run the latest.
+      Write-Host "Restoring scripts/ from pipeline branch ($pipelineHead)..."
+      git checkout "$pipelineHead" -- "scripts/"
+
+      # Derive the exports subfolder from the branch name (strip "export/" prefix)
+      $subfolder = $exportBranch -replace "^export/", ""
+
+      Write-Host "Export branch: $exportBranch"
+      Write-Host "Subfolder:     $subfolder"
+
+      Write-Host "##vso[task.setvariable variable=ExportBranch]$exportBranch"
+      Write-Host "##vso[task.setvariable variable=ExportSubfolder]$subfolder"
+    displayName: "Checkout export branch"
+
+  # ===========================================================================
+  # Step 5: Read build.json and extract solutions list
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $buildJsonPath = Join-Path "$(Build.SourcesDirectory)" "exports/$(ExportSubfolder)/build.json"
+      Write-Host "Reading build configuration from: $buildJsonPath"
+
+      if (-not (Test-Path $buildJsonPath)) {
+        Write-Error "build.json not found at: $buildJsonPath"
+        exit 1
+      }
+
+      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+      $solutions = $buildConfig.solutions
+
+      if (-not $solutions -or $solutions.Count -eq 0) {
+        Write-Error "No solutions specified in build.json"
+        exit 1
+      }
+
+      Write-Host "Solutions to export ($($solutions.Count)):"
+      foreach ($s in $solutions) {
+        $unmanagedFlag = if ($s.PSObject.Properties["isUnmanaged"] -and $s.isUnmanaged) { " [unmanaged]" } else { "" }
+        Write-Host "  - $($s.name) (v$($s.version))$unmanagedFlag"
+      }
+
+      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
+      Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
+    displayName: "Read build.json configuration"
+
+  # ===========================================================================
+  # Step 6: Authenticate pac CLI with Power Platform Dev
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      Write-Host "Authenticating pac CLI with environment: $(EnvironmentUrl)"
+
+      pac auth create `
+        --environment "$(EnvironmentUrl)" `
+        --applicationId "$(ClientId)" `
+        --clientSecret "$(ClientSecret)" `
+        --tenant "$(TenantId)"
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to authenticate with Power Platform"
+        exit 1
+      }
+
+      Write-Host "Successfully authenticated with Power Platform"
+      pac auth list
+    displayName: "Authenticate with Power Platform"
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 7: Export solutions (unmanaged), clean unpack, and pack as managed
+  # ===========================================================================
+  # Same logic as the daily export with one key difference:
+  #   isUnmanaged: true  → artifact gets the unmanaged zip for that solution
+  #   isUnmanaged: false → artifact gets the managed zip (default behaviour)
+  # Both zips are always exported and stored in solutions/ for git history.
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $solutions = @($env:SolutionsList | ConvertFrom-Json)
+      $sourceDir = "$(Build.SourcesDirectory)"
+
+      $unmanagedDir = Join-Path $sourceDir "solutions/unmanaged"
+      $unpackedDir  = Join-Path $sourceDir "solutions/unpacked"
+      $managedDir   = Join-Path $sourceDir "solutions/managed"
+
+      New-Item -ItemType Directory -Path $unmanagedDir -Force | Out-Null
+      New-Item -ItemType Directory -Path $unpackedDir  -Force | Out-Null
+      New-Item -ItemType Directory -Path $managedDir   -Force | Out-Null
+
+      $failedSolutions = @()
+      $cachedSolutions = @()
+
+      foreach ($solution in $solutions) {
+        $name    = $solution.name
+        $version = $solution.version
+
+        $isUnmanaged = $false
+        if ($solution.PSObject.Properties["isUnmanaged"]) {
+          $isUnmanaged = [bool]$solution.isUnmanaged
+        }
+
+        Write-Host ""
+        Write-Host "============================================"
+        Write-Host "  Processing: $name (v$version)  [isUnmanaged: $isUnmanaged]"
+        Write-Host "============================================"
+
+        # -----------------------------------------------------------------
+        # isExisting: skip export/unpack and use a pre-existing zip
+        # -----------------------------------------------------------------
+        if ($solution.isExisting -eq $true) {
+          Write-Host "  isExisting = true — using pre-existing zip."
+
+          if ($isUnmanaged) {
+            $existingZip = Join-Path $unmanagedDir "${name}_${version}.zip"
+            Write-Host "  isUnmanaged = true — expecting unmanaged zip: $existingZip"
+          } else {
+            $existingZip = Join-Path $managedDir "${name}_${version}.zip"
+          }
+
+          if (-not (Test-Path $existingZip)) {
+            Write-Error "  isExisting is true but expected zip not found: $existingZip"
+            $failedSolutions += $name
+            continue
+          }
+
+          Copy-Item -Path $existingZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
+          Write-Host "  Staged existing zip for artifact publishing."
+          Write-Host "`n  Solution '$name' (v$version) — skipped export (isExisting=true)."
+          continue
+        }
+
+        # -----------------------------------------------------------------
+        # Cached: managed zip already present for this name + version
+        # -----------------------------------------------------------------
+        $existingManagedZip = Join-Path $managedDir "${name}_${version}.zip"
+        if (Test-Path $existingManagedZip) {
+          Write-Host "  Managed zip already exists — using cached version."
+
+          if ($isUnmanaged) {
+            $existingUnmanagedZip = Join-Path $unmanagedDir "${name}_${version}.zip"
+            if (-not (Test-Path $existingUnmanagedZip)) {
+              Write-Host "  isUnmanaged = true but cached unmanaged zip not found — re-exporting."
+              # Fall through to fresh export below
+            } else {
+              Copy-Item -Path $existingUnmanagedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
+              Write-Host "  Staged cached unmanaged zip for artifact publishing."
+              Write-Host "`n  Solution '$name' (v$version) — cached (unmanaged)."
+              $cachedSolutions += $name
+              continue
+            }
+          } else {
+            Copy-Item -Path $existingManagedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
+            Write-Host "  Staged cached managed zip for artifact publishing."
+
+            # Detect cloud flows from cached unpacked source
+            $cachedUnpackDir = Join-Path $unpackedDir $name
+            $cachedWorkflowsDir = Join-Path $cachedUnpackDir "Workflows"
+            if (Test-Path $cachedWorkflowsDir) {
+              $cachedFlowFiles = Get-ChildItem -Path $cachedWorkflowsDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+              if ($cachedFlowFiles -and $cachedFlowFiles.Count -gt 0) {
+                Write-Host "  Cloud flows detected (cached): $($cachedFlowFiles.Count) .json file(s)"
+                $solution | Add-Member -NotePropertyName "includesCloudFlows" -NotePropertyValue $true -Force
+              }
+            }
+
+            # Detect patch from cached Solution.xml
+            $cachedSolutionXml = Join-Path $cachedUnpackDir "Other/Solution.xml"
+            if (Test-Path $cachedSolutionXml) {
+              [xml]$cachedXml = Get-Content $cachedSolutionXml
+              $parentNode = $cachedXml.ImportExportXml.SolutionManifest.ParentSolution
+              if ($parentNode -and $parentNode.UniqueName) {
+                $localizedNames = $cachedXml.ImportExportXml.SolutionManifest.LocalizedNames.LocalizedName
+                $displayName = ($localizedNames | Where-Object { $_.languagecode -eq "1033" }).description
+                if (-not $displayName) { $displayName = $name }
+                $solution | Add-Member -NotePropertyName "isPatch" -NotePropertyValue $true -Force
+                $solution | Add-Member -NotePropertyName "parentSolution" -NotePropertyValue $parentNode.UniqueName -Force
+                $solution | Add-Member -NotePropertyName "displayName" -NotePropertyValue $displayName -Force
+              }
+            }
+
+            Write-Host "`n  Solution '$name' (v$version) — cached."
+            $cachedSolutions += $name
+            continue
+          }
+        }
+
+        # -----------------------------------------------------------------
+        # Fresh export: unmanaged zip → unpack → managed zip
+        # -----------------------------------------------------------------
+        $unmanagedZip = Join-Path $unmanagedDir "$name.zip"
+        Write-Host "`nExporting unmanaged solution..."
+
+        pac solution export `
+          --name $name `
+          --path $unmanagedZip `
+          --overwrite
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Failed to export solution: $name"
+          $failedSolutions += $name
+          continue
+        }
+
+        # Clean unpack
+        $solutionUnpackDir = Join-Path $unpackedDir $name
+        Write-Host "`nUnpacking solution (clean)..."
+        if (Test-Path $solutionUnpackDir) {
+          Remove-Item -Path $solutionUnpackDir -Recurse -Force
+        }
+
+        pac solution unpack `
+          --zipfile $unmanagedZip `
+          --folder $solutionUnpackDir `
+          --allowDelete true `
+          --allowWrite true
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Failed to unpack solution: $name"
+          $failedSolutions += $name
+          continue
+        }
+
+        # Detect cloud flows
+        $workflowsDir = Join-Path $solutionUnpackDir "Workflows"
+        if (Test-Path $workflowsDir) {
+          $cloudFlowFiles = Get-ChildItem -Path $workflowsDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+          if ($cloudFlowFiles -and $cloudFlowFiles.Count -gt 0) {
+            Write-Host "  Cloud flows detected: $($cloudFlowFiles.Count) .json file(s)"
+            $solution | Add-Member -NotePropertyName "includesCloudFlows" -NotePropertyValue $true -Force
+          }
+        }
+
+        # Validate version
+        $solutionXmlPath = Join-Path $solutionUnpackDir "Other/Solution.xml"
+        if (-not (Test-Path $solutionXmlPath)) {
+          Write-Error "Solution.xml not found at: $solutionXmlPath"
+          $failedSolutions += $name
+          continue
+        }
+
+        [xml]$solutionXml = Get-Content $solutionXmlPath
+        $actualVersion = $solutionXml.ImportExportXml.SolutionManifest.Version
+        if ($actualVersion -ne $version) {
+          Write-Error "Version mismatch for '$name': build.json=$version, dev=$actualVersion"
+          $failedSolutions += $name
+          continue
+        }
+        Write-Host "  Version check passed ($version)."
+
+        # Detect patch
+        $parentNode = $solutionXml.ImportExportXml.SolutionManifest.ParentSolution
+        if ($parentNode -and $parentNode.UniqueName) {
+          $parentName = $parentNode.UniqueName
+          $localizedNames = $solutionXml.ImportExportXml.SolutionManifest.LocalizedNames.LocalizedName
+          $displayName = ($localizedNames | Where-Object { $_.languagecode -eq "1033" }).description
+          if (-not $displayName) { $displayName = $name }
+          $solution | Add-Member -NotePropertyName "isPatch" -NotePropertyValue $true -Force
+          $solution | Add-Member -NotePropertyName "parentSolution" -NotePropertyValue $parentName -Force
+          $solution | Add-Member -NotePropertyName "displayName" -NotePropertyValue $displayName -Force
+        }
+
+        # Rename unmanaged zip to versioned name
+        $versionedUnmanagedZip = Join-Path $unmanagedDir "${name}_${version}.zip"
+        Move-Item -Path $unmanagedZip -Destination $versionedUnmanagedZip -Force
+
+        # Export managed zip and store in solutions/managed/
+        $managedZip = Join-Path $managedDir "${name}_${version}.zip"
+        Write-Host "`nExporting managed solution..."
+
+        pac solution export `
+          --name $name `
+          --path $managedZip `
+          --managed `
+          --overwrite
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Failed to export managed solution: $name"
+          $failedSolutions += $name
+          continue
+        }
+
+        # Stage the appropriate zip for the artifact
+        if ($isUnmanaged) {
+          Copy-Item -Path $versionedUnmanagedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
+          Write-Host "  Staged unmanaged zip for artifact (isUnmanaged=true)."
+        } else {
+          Copy-Item -Path $managedZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
+          Write-Host "  Staged managed zip for artifact."
+        }
+
+        Write-Host "`n  Solution '$name' (v$version) processed successfully."
+      }
+
+      # -----------------------------------------------------------------
+      # Write updated build.json (with includesCloudFlows flags) and stage
+      # -----------------------------------------------------------------
+      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
+      $buildConfig   = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+      $updatedConfig = @{ solutions = @($solutions) }
+
+      if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData) {
+        $updatedConfig["configData"] = $buildConfig.configData
+      }
+
+      $updatedConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
+      Write-Host "Updated build.json."
+
+      Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
+      Write-Host "Staged build.json for artifact."
+
+      Write-Host ""
+      Write-Host "============================================"
+      Write-Host "  Processing Summary"
+      Write-Host "============================================"
+      $exportedCount = $solutions.Count - $failedSolutions.Count - $cachedSolutions.Count
+      Write-Host "Total:    $($solutions.Count)"
+      Write-Host "Exported: $exportedCount"
+      Write-Host "Cached:   $($cachedSolutions.Count)"
+      Write-Host "Failed:   $($failedSolutions.Count)"
+
+      if ($failedSolutions.Count -gt 0) {
+        Write-Host "Failed: $($failedSolutions -join ', ')"
+        Write-Error "One or more solutions failed to process"
+        exit 1
+      }
+
+      Write-Host "##vso[task.setvariable variable=HasSolutionsToDeploy]true"
+
+      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
+      Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
+
+      if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData.Count -gt 0) {
+        $configDataJson = @($buildConfig.configData) | ConvertTo-Json -Compress -Depth 10
+        Write-Host "##vso[task.setvariable variable=ConfigDataList]$configDataJson"
+        Write-Host "##vso[task.setvariable variable=HasConfigData]true"
+      } else {
+        Write-Host "##vso[task.setvariable variable=HasConfigData]false"
+      }
+
+      Write-Host "All solutions processed successfully."
+    displayName: "Export and unpack solutions"
+
+  # ===========================================================================
+  # Step 8: Extract configuration data from Dev (if configData defined)
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      if ($env:HasConfigData -ne "true") {
+        Write-Host "No configData in build.json — skipping extraction."
+        exit 0
+      }
+
+      $configData = @($env:ConfigDataList | ConvertFrom-Json)
+      $sourceDir  = "$(Build.SourcesDirectory)"
+      $exportDir  = Join-Path $sourceDir "exports/$(ExportSubfolder)"
+      $envUrl     = "$(EnvironmentUrl)".TrimEnd("/")
+
+      # Acquire OAuth token for Dataverse Web API
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
+      }
+
+      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+      $apiHeaders = @{
+        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+        "OData-MaxVersion" = "4.0"
+        "OData-Version"    = "4.0"
+        "Content-Type"     = "application/json"
+        "Accept"           = "application/json"
+      }
+      Write-Host "Authenticated with Dataverse API for config data extraction."
+
+      # Extract — SourceDir is the export folder so dataFile paths resolve relative to it
+      $syncScript = Join-Path $sourceDir "scripts/Sync-ConfigData.ps1"
+      & $syncScript `
+        -Mode Extract `
+        -ConfigData $configData `
+        -EnvironmentUrl $envUrl `
+        -ApiHeaders $apiHeaders `
+        -SourceDir $exportDir
+
+      # Stage config data files for the artifact
+      foreach ($ds in $configData) {
+        $dataFilePath = Join-Path $exportDir $ds.dataFile
+        if (Test-Path $dataFilePath) {
+          $destDir = Join-Path "$(Build.ArtifactStagingDirectory)" (Split-Path $ds.dataFile -Parent)
+          New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+          Copy-Item -Path $dataFilePath -Destination (Join-Path "$(Build.ArtifactStagingDirectory)" $ds.dataFile)
+          Write-Host "Staged config data: $($ds.dataFile)"
+        }
+      }
+    displayName: "Extract config data from Dev"
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 9: Publish solutions and build.json as pipeline artifact
+  # ===========================================================================
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish NewDevSolutions artifact"
+    inputs:
+      targetPath: $(Build.ArtifactStagingDirectory)
+      artifact: NewDevSolutions
+
+  # ===========================================================================
+  # Step 10: Commit and push changes to the export branch
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      git config user.email "pipeline@dev.azure.com"
+      git config user.name "Azure DevOps Pipeline"
+
+      # Stage solution files, config data, and updated build.json
+      git add solutions/
+      git add "exports/$(ExportSubfolder)/configdata/"
+      git add "exports/$(ExportSubfolder)/build.json"
+
+      $status = git status --porcelain solutions/ "exports/$(ExportSubfolder)/configdata/" "exports/$(ExportSubfolder)/build.json"
+      if (-not $status) {
+        Write-Host "No changes detected."
+
+        if ($env:HasSolutionsToDeploy -eq "true") {
+          $commitMsg = "chore: trigger newdev deployment for [$(ExportSubfolder)] (no source changes)"
+          git commit --allow-empty -m "$commitMsg"
+          git push origin "$(ExportBranch)"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to push empty commit to $(ExportBranch)"
+            exit 1
+          }
+          Write-Host "##vso[task.setvariable variable=HasChanges]true"
+          exit 0
+        } else {
+          Write-Host "##vso[task.setvariable variable=HasChanges]false"
+          exit 0
+        }
+      }
+
+      Write-Host "Changes detected:"
+      git status --short solutions/ "exports/$(ExportSubfolder)/"
+
+      Write-Host "##vso[task.setvariable variable=HasChanges]true"
+
+      $commitMsg = "chore: export Power Platform solutions for new dev [$(ExportSubfolder)]"
+      git commit -m "$commitMsg"
+      git push origin "$(ExportBranch)"
+
+      if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to push changes to $(ExportBranch)"
+        exit 1
+      }
+
+      Write-Host "Changes committed and pushed to $(ExportBranch)"
+    displayName: "Commit and push solution files"
+
+  # ===========================================================================
+  # Step 11: Create a Pull Request and auto-complete into main
+  # ===========================================================================
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $orgUrl  = "$(System.TeamFoundationCollectionUri)"
+      $project = "$(System.TeamProject)"
+      $repoId  = "$(Build.Repository.ID)"
+      $token   = $env:SYSTEM_ACCESSTOKEN
+
+      $headers = @{
+        "Authorization" = "Bearer $token"
+        "Content-Type"  = "application/json"
+      }
+
+      $solutions = @($env:SolutionsList | ConvertFrom-Json)
+      $solutionBullets = ($solutions | ForEach-Object {
+        $u = if ($_.PSObject.Properties["isUnmanaged"] -and $_.isUnmanaged) { " (unmanaged)" } else { "" }
+        "- $($_.name) (v$($_.version))$u"
+      }) -join "`n"
+
+      $description = (
+        "## New Dev Environment Export`n`n" +
+        "**Branch:** ``$(ExportBranch)```n" +
+        "**Date:** $(ExportSubfolder)`n`n" +
+        "### Solutions`n" +
+        "$solutionBullets`n`n" +
+        "---`n" +
+        "*Created automatically by the export-to-newdev pipeline.*"
+      )
+
+      $prBody = @{
+        sourceRefName = "refs/heads/$(ExportBranch)"
+        targetRefName = "refs/heads/main"
+        title         = "New Dev Export - $(ExportSubfolder)"
+        description   = $description
+      } | ConvertTo-Json -Depth 5
+
+      $createUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests?api-version=7.1"
+      Write-Host "Creating Pull Request..."
+
+      try {
+        $pr   = Invoke-RestMethod -Uri $createUrl -Method Post -Headers $headers -Body $prBody
+        $prId = $pr.pullRequestId
+        Write-Host "Pull Request created: PR #${prId}"
+      } catch {
+        Write-Error "Failed to create Pull Request: $_"
+        exit 1
+      }
+
+      $updateUrl = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}?api-version=7.1"
+
+      # Approve
+      $approveBody  = @{ vote = 10 } | ConvertTo-Json
+      $reviewerUrl  = "${orgUrl}${project}/_apis/git/repositories/${repoId}/pullrequests/${prId}/reviewers/$($pr.createdBy.id)?api-version=7.1"
+      try {
+        Invoke-RestMethod -Uri $reviewerUrl -Method Put -Headers $headers -Body $approveBody | Out-Null
+        Write-Host "PR #${prId} approved."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not auto-approve PR #${prId}: $_"
+      }
+
+      # Auto-complete
+      $completeBody = @{
+        autoCompleteSetBy = @{ id = $pr.createdBy.id }
+        completionOptions = @{
+          deleteSourceBranch = $true
+          mergeStrategy      = "squash"
+          mergeCommitMessage = "chore: export Power Platform solutions for new dev [$(ExportSubfolder)]"
+        }
+      } | ConvertTo-Json -Depth 5
+
+      try {
+        Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $completeBody | Out-Null
+        Write-Host "PR #${prId} set to auto-complete."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not set auto-complete on PR #${prId}: $_"
+      }
+
+      # Attempt immediate merge
+      $mergeBody = @{
+        status                = "completed"
+        lastMergeSourceCommit = $pr.lastMergeSourceCommit
+        completionOptions     = @{
+          deleteSourceBranch = $true
+          mergeStrategy      = "squash"
+          mergeCommitMessage = "chore: export Power Platform solutions for new dev [$(ExportSubfolder)]"
+        }
+      } | ConvertTo-Json -Depth 5
+
+      try {
+        Invoke-RestMethod -Uri $updateUrl -Method Patch -Headers $headers -Body $mergeBody | Out-Null
+        Write-Host "PR #${prId} completed and merged into main."
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not auto-complete PR #${prId} immediately. It will merge once policies are met: $_"
+      }
+
+      # Delete source branch explicitly
+      try {
+        $refsUrl   = "${orgUrl}${project}/_apis/git/repositories/${repoId}/refs?filter=heads/$(ExportBranch)&api-version=7.1"
+        $branchRef = Invoke-RestMethod -Uri $refsUrl -Method Get -Headers $headers
+        if ($branchRef.value -and $branchRef.value.Count -gt 0) {
+          $deleteBody = @(
+            @{
+              name        = "refs/heads/$(ExportBranch)"
+              oldObjectId = $branchRef.value[0].objectId
+              newObjectId = "0000000000000000000000000000000000000000"
+            }
+          ) | ConvertTo-Json
+          Invoke-RestMethod -Uri "${orgUrl}${project}/_apis/git/repositories/${repoId}/refs?api-version=7.1" `
+            -Method Post -Headers $headers -Body $deleteBody | Out-Null
+          Write-Host "Source branch deleted: $(ExportBranch)"
+        }
+      } catch {
+        Write-Host "##vso[task.logissue type=warning]Could not delete source branch $(ExportBranch): $_"
+      }
+
+      Write-Host "`nPull Request processing complete."
+    displayName: "Create and merge Pull Request"
+    condition: and(succeeded(), eq(variables['HasChanges'], 'true'))
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
