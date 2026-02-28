@@ -63,7 +63,7 @@ The deployment will continue automatically after approval.
 
 ## How to run a pipeline manually
 
-All pipelines (except the Daily Export, which runs on a schedule) can also be triggered manually.
+All pipelines can be triggered manually. The Daily Export also runs automatically on a schedule (10 PM ET), but you can run it on demand too — useful if you need to re-run or test outside of the normal schedule.
 
 1. Go to **Pipelines** in Azure DevOps
 2. Find the pipeline you want to run

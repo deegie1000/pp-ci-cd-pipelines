@@ -33,6 +33,9 @@ trigger: none
 resources:
   pipelines:
     - pipeline: ExportToNewDev
+      # IMPORTANT: This value must exactly match the ADO pipeline name for the
+      # export-for-new-dev pipeline. If you rename that pipeline in ADO, update
+      # this value to match — otherwise artifact downloads will fail.
       source: "export-for-new-dev"
       trigger: none
 

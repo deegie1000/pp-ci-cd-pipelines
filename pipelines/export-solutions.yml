@@ -1,9 +1,10 @@
 # =============================================================================
 # Pipeline: Daily Power Platform Solution Export
 # =============================================================================
-# Runs daily at 10pm ET. Detects export branches for the current date,
-# exports solutions from the dev environment, unpacks them, converts to
-# managed, and creates a PR to main.
+# Runs daily at 10pm ET, or can be triggered manually on demand.
+# Detects export branches for the current date, exports solutions from
+# the dev environment, unpacks them, converts to managed, and creates a
+# PR to main.
 #
 # Branch naming convention: export/yyyy-MM-dd-{token}
 # Configuration file:       exports/{yyyy-MM-dd-token}/build.json
@@ -41,12 +42,7 @@ schedules:
 # -----------------------------------------------------------------------------
 parameters:
   - name: exportBranch
-    displayName: "Override export branch (leave empty for auto-detect)"
-    type: string
-    default: ""
-
-  - name: dateOverride
-    displayName: "Override date for branch detection (yyyy-MM-dd format, leave empty for today)"
+    displayName: "Override export branch (leave empty or type 'default' to auto-detect)"
     type: string
     default: ""
 
@@ -98,20 +94,16 @@ steps:
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      # Determine target date
-      if ("${{ parameters.dateOverride }}") {
-        $targetDate = "${{ parameters.dateOverride }}"
-        Write-Host "Using override date: $targetDate"
-      } else {
-        # Use Eastern Time for date calculation
-        $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
-        $targetDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $eastern).ToString("yyyy-MM-dd")
-        Write-Host "Using today's date (Eastern): $targetDate"
-      }
+      # Normalise: treat the literal word "default" the same as blank
+      $exportBranch = "${{ parameters.exportBranch }}"
+      if ($exportBranch -eq "default") { $exportBranch = "" }
+
+      # Target date is always today in Eastern Time
+      $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+      $targetDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $eastern).ToString("yyyy-MM-dd")
+      Write-Host "Target date (Eastern): $targetDate"
 
       # Determine export branch
-      $exportBranch = "${{ parameters.exportBranch }}"
-
       if ($exportBranch) {
         Write-Host "Using override export branch: $exportBranch"
       } else {
