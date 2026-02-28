@@ -147,14 +147,13 @@ Update build.json to match the dev environment before re-running.
 
 If `postExportVersion` is set, the pipeline bumps versions in Dev **after** the export and artifact publishing are complete. This does not affect the exported artifacts &mdash; they retain the original versions from `build.json`.
 
-**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with optional overrides for branch name and date.
+**Trigger:** Daily at **10:00 PM Eastern Time** (3:00 AM UTC). Also runnable manually with an optional branch override.
 
 **Parameters (manual runs):**
 
 | Parameter | Description |
 |---|---|
-| `exportBranch` | Override export branch name (skip auto-detect). Leave blank or type `default` to auto-detect. |
-| `dateOverride` | Override date for branch detection (yyyy-MM-dd). Leave blank or type `default` to use today's date. |
+| `exportBranch` | Override export branch name (skip auto-detect). Leave blank or type `default` to auto-detect from today's date. |
 
 **Auth:** Uses pac CLI with secret pipeline variables (`ClientId`, `ClientSecret`, `TenantId`).
 
@@ -907,7 +906,7 @@ git commit -m "configure export for 2026-02-15-sprint42"
 git push -u origin export/2026-02-15-sprint42
 ```
 
-**To run manually:** Go to **Pipelines** > select `export-solutions` > **Run pipeline**. Optionally override the export branch or date.
+**To run manually:** Go to **Pipelines** > select `export-solutions` > **Run pipeline**. Optionally supply an export branch to skip auto-detect.
 
 ### Release Pipeline (Automatic + Manual Approval)
 

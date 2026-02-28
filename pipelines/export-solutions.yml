@@ -42,12 +42,7 @@ schedules:
 # -----------------------------------------------------------------------------
 parameters:
   - name: exportBranch
-    displayName: "Override export branch (leave empty for auto-detect)"
-    type: string
-    default: ""
-
-  - name: dateOverride
-    displayName: "Override date for branch detection (yyyy-MM-dd format, leave empty for today)"
+    displayName: "Override export branch (leave empty or type 'default' to auto-detect)"
     type: string
     default: ""
 
@@ -99,23 +94,14 @@ steps:
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
-      # Normalise parameters: treat the literal word "default" the same as blank
-      $dateOverride = "${{ parameters.dateOverride }}"
-      if ($dateOverride -eq "default") { $dateOverride = "" }
-
+      # Normalise: treat the literal word "default" the same as blank
       $exportBranch = "${{ parameters.exportBranch }}"
       if ($exportBranch -eq "default") { $exportBranch = "" }
 
-      # Determine target date
-      if ($dateOverride) {
-        $targetDate = $dateOverride
-        Write-Host "Using override date: $targetDate"
-      } else {
-        # Use Eastern Time for date calculation
-        $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
-        $targetDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $eastern).ToString("yyyy-MM-dd")
-        Write-Host "Using today's date (Eastern): $targetDate"
-      }
+      # Target date is always today in Eastern Time
+      $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+      $targetDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $eastern).ToString("yyyy-MM-dd")
+      Write-Host "Target date (Eastern): $targetDate"
 
       # Determine export branch
       if ($exportBranch) {
