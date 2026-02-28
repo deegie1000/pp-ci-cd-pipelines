@@ -1,9 +1,10 @@
 # =============================================================================
 # Pipeline: Daily Power Platform Solution Export
 # =============================================================================
-# Runs daily at 10pm ET. Detects export branches for the current date,
-# exports solutions from the dev environment, unpacks them, converts to
-# managed, and creates a PR to main.
+# Runs daily at 10pm ET, or can be triggered manually on demand.
+# Detects export branches for the current date, exports solutions from
+# the dev environment, unpacks them, converts to managed, and creates a
+# PR to main.
 #
 # Branch naming convention: export/yyyy-MM-dd-{token}
 # Configuration file:       exports/{yyyy-MM-dd-token}/build.json
@@ -98,9 +99,16 @@ steps:
   - pwsh: |
       $ErrorActionPreference = "Stop"
 
+      # Normalise parameters: treat the literal word "default" the same as blank
+      $dateOverride = "${{ parameters.dateOverride }}"
+      if ($dateOverride -eq "default") { $dateOverride = "" }
+
+      $exportBranch = "${{ parameters.exportBranch }}"
+      if ($exportBranch -eq "default") { $exportBranch = "" }
+
       # Determine target date
-      if ("${{ parameters.dateOverride }}") {
-        $targetDate = "${{ parameters.dateOverride }}"
+      if ($dateOverride) {
+        $targetDate = $dateOverride
         Write-Host "Using override date: $targetDate"
       } else {
         # Use Eastern Time for date calculation
@@ -110,8 +118,6 @@ steps:
       }
 
       # Determine export branch
-      $exportBranch = "${{ parameters.exportBranch }}"
-
       if ($exportBranch) {
         Write-Host "Using override export branch: $exportBranch"
       } else {
