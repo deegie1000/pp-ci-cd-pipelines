@@ -294,3 +294,6 @@ Make sure the folder name inside `exports/` matches the date portion of your bra
 
 **Not sure what solution names to use?**
 In Power Platform, go to **Solutions**, find your solution, and use the **Name** column (not the Display Name). It usually looks like `MySolutionName` with no spaces.
+
+**The pipeline created a PR but it can't auto-merge due to a merge conflict**
+This happens when `main` was updated after you created your branch and Git can't automatically reconcile the differences. See the full step-by-step guide: [RESOLVING-MERGE-CONFLICTS.md](./RESOLVING-MERGE-CONFLICTS.md).
