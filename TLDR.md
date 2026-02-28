@@ -18,7 +18,7 @@ They move Power Platform solutions (apps, flows, etc.) from development environm
 | **Release** | Automatically after Daily Export | Deploys to QA (automatic), then waits for approval to go to Stage and Prod |
 | **Export from Pre-Dev** | You run it manually | Pulls a single solution out of Pre-Dev and starts deploying it through all environments |
 | **Deploy Solution** | Automatically after Pre-Dev Export | Deploys that single solution through Dev → QA → Stage → Prod (with approvals) |
-| **Export to New Dev** | You run it manually | Packages solutions from Dev to seed a brand-new Dev environment |
+| **Export for New Dev** | You run it manually | Packages solutions from Dev to seed a brand-new Dev environment |
 | **Deploy to New Dev** | You run it manually | Takes that package and installs it into the new Dev environment |
 
 ---
@@ -79,19 +79,19 @@ Use this when someone needs a fresh Power Platform environment that mirrors Dev 
 
 **Step 1 — Export to New Dev**
 
-1. Create an export branch in the repo following the naming format: `export/yyyy-MM-dd-description`
-   (e.g. `export/2026-02-28-onboarding-alex`)
-2. Add a `build.json` file in the `exports/2026-02-28-onboarding-alex/` folder listing the solutions you want — ask your developer to set this up if needed
-3. Go to **Pipelines** → **export-to-newdev**
+1. Create an export branch in the repo following the naming format: `export/{token}`
+   (e.g. `export/onboarding-alex`)
+2. Add a `build.json` file in the `exports/onboarding-alex/` folder listing the solutions you want — ask your developer to set this up if needed
+3. Go to **Pipelines** → **export-for-new-dev**
 4. Click **Run pipeline**
-5. In the **Export branch** field, enter the branch name you created (e.g. `export/2026-02-28-onboarding-alex`)
+5. In the **Export branch** field, enter the branch name you created (e.g. `export/onboarding-alex`)
 6. Click **Run** — the pipeline will export the solutions and publish a package
 
 **Step 2 — Deploy to New Dev**
 
 1. Go to **Pipelines** → **deploy-to-newdev**
 2. Click **Run pipeline**
-3. ADO will ask you to select which **export-to-newdev** run to deploy — pick the one you just ran
+3. ADO will ask you to select which **export-for-new-dev** run to deploy — pick the one you just ran
 4. Click **Run**
 
 The solutions will be installed into the New Dev environment. Solutions marked as "unmanaged" in the configuration will be installed as unmanaged (editable), which is typical for a Dev environment.
@@ -141,4 +141,4 @@ The pipeline will export from Pre-Dev and automatically start deploying to Dev, 
 | **Variable group** | A named set of passwords/URLs stored securely in ADO — edited by your ADO admin |
 | **ADO Environment** | A named checkpoint in ADO where approval checks live |
 | **build.json** | A configuration file telling the pipeline which solutions to export/deploy and at what versions |
-| **Export branch** | A short-lived Git branch (named `export/yyyy-MM-dd-...`) that holds a build.json for one export run |
+| **Export branch** | A short-lived Git branch that holds a `build.json` for one export run. Daily export branches use `export/yyyy-MM-dd-{token}`; New Dev export branches use `export/{token}` (no date required) |
