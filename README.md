@@ -128,7 +128,7 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - Checks if a managed zip already exists for this name + version (cache check &mdash; skips if so)
    - Exports the **unmanaged** solution zip from Power Platform &rarr; `solutions/unmanaged/`
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
-   - **Detects cloud flows**: checks for `.json` files in the unpacked `Workflows/` directory. If found, sets `includesCloudFlows: true` on the solution entry in `build.json`
+   - **Detects [cloud flows](https://learn.microsoft.com/en-us/power-automate/overview-cloud)**: checks for `.json` files in the unpacked `Workflows/` directory. If found, sets `includesCloudFlows: true` on the solution entry in `build.json`
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - Exports the **managed** solution directly from Power Platform &rarr; `solutions/managed/`
 4. Writes the updated `build.json` (with the auto-detected `includesCloudFlows` flag) and publishes it along with managed zips, config data files, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
@@ -190,7 +190,7 @@ Deploys managed solutions through three environments in sequence: **QA &rarr; St
 
 Stage and Prod approvals are controlled by **ADO Environment approval checks** (not pipeline gates). See [Step 5: Create ADO Environments](#step-5-create-ado-environments-release-pipeline) for setup.
 
-**Trigger:** Automatic &mdash; runs when the `export-solutions` pipeline completes on the `main` branch.
+**Trigger:** Automatic &mdash; runs when the `export-solutions` pipeline completes on the `main` branch. See [pipeline completion triggers](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/pipeline-triggers) on Microsoft Learn.
 
 **Variables (manual runs):**
 
@@ -423,11 +423,11 @@ The `build.json` file defines which solutions to export and their **expected ver
 | Field | Description |
 |---|---|
 | `solutions` | Ordered array of solutions to export. Order matters &mdash; the release pipeline deploys in this order (put dependencies first). |
-| `solutions[].name` | The solution's **unique name** as it appears in Power Platform (not the display name). |
+| `solutions[].name` | The solution's **[unique name](https://learn.microsoft.com/en-us/power-platform/alm/solution-concepts-alm)** as it appears in Power Platform (not the display name). |
 | `solutions[].version` | The **exact version** expected in the Dev environment. Must match the version in Dev's `Solution.xml`, or the export pipeline will fail. |
 | `solutions[].includeDeploymentSettings` | Optional boolean (default: `false`). If `true`, the release pipeline will apply a deployment settings file (`deploymentSettings_{stage}.json`) when importing this solution. Only one solution should have this set to `true`. |
 | `solutions[].postExportVersion` | Optional string. If set, the export pipeline bumps this solution's version in Dev to the specified version after export. See [Post-Export Version Management](#post-export-version-management). |
-| `solutions[].createNewPatch` | Optional boolean (default: `false`). Only used when `postExportVersion` is set. If `true`, a new patch is cloned from this solution at `postExportVersion` via the Dataverse `CloneAsPatch` action. If `false`, the solution's version is updated directly via `pac solution online-version`. |
+| `solutions[].createNewPatch` | Optional boolean (default: `false`). Only used when `postExportVersion` is set. If `true`, a new patch is cloned from this solution at `postExportVersion` via the Dataverse [`CloneAsPatch`](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/reference/cloneaspatch) action. If `false`, the solution's version is updated directly via [`pac solution online-version`](https://learn.microsoft.com/en-us/power-platform/developer/cli/reference/solution). |
 | `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
 | `solutions[].isExisting` | Optional boolean (default: `false`). If `true`, the export pipeline skips exporting this solution from Power Platform and uses the managed zip already present in `solutions/managed/{name}_{version}.zip`. Use this when the zip is already committed to the repo and no re-export is needed. The pipeline fails if the zip is not found. |
 | `solutions[].isRollback` | Optional boolean (default: `false`). If `true`, the deploy pipelines omit `--skip-lower-version` when importing this solution, allowing a lower (rollback) version to be installed over a higher one. Applies to all stages (Dev, QA, Stage, Prod). |
@@ -457,7 +457,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 
 ### Deployment Settings
 
-Deployment settings allow you to configure environment-specific values (such as connection references and environment variables) that get applied when importing a solution into a target environment.
+Deployment settings allow you to configure environment-specific values (such as [connection references](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/create-connection-reference) and [environment variables](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/environmentvariables)) that get applied when importing a solution into a target environment.
 
 **How it works:**
 
@@ -467,7 +467,7 @@ Deployment settings allow you to configure environment-specific values (such as 
    - `deploymentSettings_Stage.json`
    - `deploymentSettings_Prod.json`
 3. The export pipeline includes these files in the `ManagedSolutions` artifact automatically
-4. During deployment, the release pipeline passes the matching file to `pac solution import --settings-file`
+4. During deployment, the release pipeline passes the matching file to `pac solution import --settings-file` (see [connection references and environment variables with build tools](https://learn.microsoft.com/en-us/power-platform/alm/conn-ref-env-variables-build-tools) for the file schema)
 
 **Root `deploymentSettings/` folder:**
 
@@ -563,8 +563,8 @@ If a solution entry in `build.json` includes a `postExportVersion` property, the
 
 | `createNewPatch` | Action |
 |---|---|
-| `false` (or omitted) | Calls `pac solution online-version` to set the solution's version to `postExportVersion` directly |
-| `true` | Calls the Dataverse `CloneAsPatch` action to create a new patch at `postExportVersion`. If the solution is itself a patch, the new patch is cloned from its **parent** (base) solution — Dataverse does not allow creating a patch from a patch. |
+| `false` (or omitted) | Calls [`pac solution online-version`](https://learn.microsoft.com/en-us/power-platform/developer/cli/reference/solution) to set the solution's version to `postExportVersion` directly |
+| `true` | Calls the Dataverse [`CloneAsPatch`](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/reference/cloneaspatch) action to create a new patch at `postExportVersion`. If the solution is itself a patch, the new patch is cloned from its **parent** (base) solution — Dataverse does not allow creating a patch from a patch. See [Create patches to simplify solution updates](https://learn.microsoft.com/en-us/power-platform/alm/create-patches-simplify-solution-updates) on Microsoft Learn. |
 
 **Example:**
 
@@ -593,11 +593,11 @@ Configuration data allows you to move reference/lookup data (such as US States, 
 **How it works:**
 
 1. Define one or more data sets in the `configData` array of `build.json`
-2. During the daily export, the pipeline queries each data set from Dev using OData (`$select` + optional `$filter`)
+2. During the daily export, the pipeline queries each data set from Dev using [OData](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/query-data-web-api) (`$select` + optional `$filter`)
 3. Results are written as JSON files to `configdata/` inside the export folder (the same folder as `build.json`, e.g., `exports/2026-02-15-sprint42/configdata/`) and included in the pipeline artifact
 4. During deployment, the pipeline reads each data file and PATCHes every record into the target environment using the record's primary key GUID
 
-**Stable GUIDs:** This approach requires that the primary key GUID for each record is **the same across all environments**. When you create records in Dev, they get assigned GUIDs. Those exact GUIDs are used to create-or-update (upsert) records in QA, Stage, and Prod. The Dataverse Web API `PATCH /api/data/v9.2/{entity}({guid})` creates the record with that GUID if it doesn't exist, or updates it if it does.
+**Stable GUIDs:** This approach requires that the primary key GUID for each record is **the same across all environments**. When you create records in Dev, they get assigned GUIDs. Those exact GUIDs are used to create-or-update (upsert) records in QA, Stage, and Prod. The [Dataverse Web API](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/overview) `PATCH /api/data/v9.2/{entity}({guid})` creates the record with that GUID if it doesn't exist, or updates it if it does.
 
 **Data file format** (`configdata/USStates.json`):
 
@@ -683,8 +683,8 @@ Invoke-Pester tests/ -Output Detailed
 | Requirement | Details |
 |---|---|
 | **Azure DevOps Organization** | Any ADO org with Pipelines enabled |
-| **Power Platform Build Tools** | Install the [Power Platform Build Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.PowerPlatform-BuildTools) extension from the Visual Studio Marketplace into your ADO organization |
-| **pac CLI (Power Platform CLI)** | Installed automatically at runtime via `dotnet tool install --global Microsoft.PowerApps.CLI.Tool`. No pre-installation required; Microsoft-hosted agents include the .NET SDK. |
+| **Power Platform Build Tools** | Install the [Power Platform Build Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.PowerPlatform-BuildTools) extension from the Visual Studio Marketplace into your ADO organization. Docs: [Power Platform Build Tools for Azure DevOps](https://learn.microsoft.com/en-us/power-platform/alm/devops-build-tools). |
+| **pac CLI (Power Platform CLI)** | Installed automatically at runtime via `dotnet tool install --global Microsoft.PowerApps.CLI.Tool`. No pre-installation required; Microsoft-hosted agents include the .NET SDK. Docs: [Power Platform CLI](https://learn.microsoft.com/en-us/power-platform/developer/cli/introduction). |
 | **App Registration (Service Principal)** | An Entra ID app registration with client secret, granted **System Administrator** or **System Customizer** role in the target Power Platform environments |
 | **Agent Pool** | Uses `windows-latest` Microsoft-hosted agents (no self-hosted agent required) |
 
@@ -706,7 +706,7 @@ Invoke-Pester tests/ -Output Detailed
    - **Client secret value**
 5. In the [Power Platform Admin Center](https://admin.powerplatform.microsoft.com), register this app as an **Application User** in **all** environments (Pre-Dev, Dev, QA, Stage, Prod) with the **System Administrator** security role
 
-> **Note:** You can use the same app registration across all environments, or create separate ones per environment for tighter access control.
+> **Note:** You can use the same app registration across all environments, or create separate ones per environment for tighter access control. See [Register an application in Microsoft Entra ID](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) and [Manage application users](https://learn.microsoft.com/en-us/power-platform/admin/manage-application-users) on Microsoft Learn.
 
 ### Step 3: Create Power Platform Service Connections
 
@@ -716,7 +716,7 @@ Invoke-Pester tests/ -Output Detailed
 
 ### Step 4: Create Variable Groups (Release &amp; Deploy Pipelines)
 
-The release pipeline, deploy pipeline, and pre-dev export pipeline use **variable groups** to store per-environment credentials. Create one group for each environment.
+The release pipeline, deploy pipeline, and pre-dev export pipeline use **[variable groups](https://learn.microsoft.com/en-us/azure/devops/pipelines/library/variable-groups)** to store per-environment credentials. Create one group for each environment.
 
 1. Go to **Pipelines** > **Library** > **+ Variable group**
 2. Create five variable groups with the following names and variables:
@@ -771,7 +771,7 @@ The release pipeline, deploy pipeline, and pre-dev export pipeline use **variabl
 
 ### Step 5: Create ADO Environments (Release &amp; Deploy Pipelines)
 
-Both the release pipeline and the deploy pipeline use **ADO Environments** to gate deployments. Environments with approval checks will pause the pipeline and require manual approval before proceeding.
+Both the release pipeline and the deploy pipeline use **[ADO Environments](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/environments)** to gate deployments. Environments with approval checks will pause the pipeline and require manual approval before proceeding.
 
 1. Go to **Pipelines** > **Environments** > **New environment**
 2. Create five environments:
@@ -994,7 +994,7 @@ The solution will deploy through all four stages (Dev &rarr; QA &rarr; Stage &ra
 
 ## Changing the Schedule
 
-The daily export schedule is defined as a cron expression in UTC:
+The daily export schedule is defined as a [cron expression](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/scheduled-triggers) in UTC:
 
 ```yaml
 schedules:
@@ -1080,3 +1080,41 @@ Common examples:
 | "Failed to push branch" | Build service lacks Contribute or Create branch permission | Grant the Build Service account **Contribute** and **Create branch** permissions on the repository (see Step 9) |
 | "Failed to create Pull Request" | Build service lacks Create pull request permission | Grant the Build Service account **Create pull requests** and **Contribute to pull requests** permissions on the repository (see Step 9) |
 | "Could not delete source branch" warning after PR merge | Build service lacks Force push permission | Grant **Force push (rewrite history, delete branches)** to the Build Service account on the repository (see Step 9) |
+
+---
+
+## Resources
+
+Microsoft Learn documentation referenced in this README:
+
+**Power Platform & ALM**
+- [Solution concepts for ALM](https://learn.microsoft.com/en-us/power-platform/alm/solution-concepts-alm)
+- [Power Platform Build Tools for Azure DevOps](https://learn.microsoft.com/en-us/power-platform/alm/devops-build-tools)
+- [Create patches to simplify solution updates](https://learn.microsoft.com/en-us/power-platform/alm/create-patches-simplify-solution-updates)
+- [Connection references and environment variables with build tools](https://learn.microsoft.com/en-us/power-platform/alm/conn-ref-env-variables-build-tools)
+
+**Power Platform CLI (pac)**
+- [Power Platform CLI overview](https://learn.microsoft.com/en-us/power-platform/developer/cli/introduction)
+- [pac solution command reference](https://learn.microsoft.com/en-us/power-platform/developer/cli/reference/solution)
+
+**Dataverse**
+- [Connection references in Power Apps](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/create-connection-reference)
+- [Environment variables in solutions](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/environmentvariables)
+- [Dataverse Web API overview](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/overview)
+- [Query data using OData](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/query-data-web-api)
+- [CloneAsPatch Web API action](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/reference/cloneaspatch)
+
+**Power Automate**
+- [Overview of cloud flows](https://learn.microsoft.com/en-us/power-automate/overview-cloud)
+
+**Power Platform Administration**
+- [Manage application users](https://learn.microsoft.com/en-us/power-platform/admin/manage-application-users)
+
+**Microsoft Entra ID**
+- [Register an application in Microsoft Entra ID](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)
+
+**Azure DevOps Pipelines**
+- [Pipeline completion triggers](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/pipeline-triggers)
+- [Scheduled triggers (cron)](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/scheduled-triggers)
+- [Variable groups](https://learn.microsoft.com/en-us/azure/devops/pipelines/library/variable-groups)
+- [Environments and approval checks](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/environments)
