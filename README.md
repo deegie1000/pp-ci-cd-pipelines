@@ -2,6 +2,52 @@
 
 Azure DevOps pipelines for exporting, versioning, and deploying Power Platform solutions across environments.
 
+> **New to this repo?** See [TLDR.md](./TLDR.md) for a plain-English guide on how to use the pipelines.
+
+## Contents
+
+- [Repository Structure](#repository-structure)
+- [Pipeline Overview](#pipeline-overview)
+- [Pipelines](#pipelines)
+  - [1. Daily Export Solutions](#1-daily-export-solutions-pipelinesexport-solutionsyml)
+  - [2. Release Solutions](#2-release-solutions-pipelinesrelease-solutionsyml)
+  - [3. Export Solution from Pre-Dev](#3-export-solution-from-pre-dev-pipelinesexport-solution-predevyml)
+  - [4. Deploy Solution](#4-deploy-solution-pipelinesdeploy-solutionyml)
+  - [5. Export to New Dev](#5-export-to-new-dev-pipelinesexport-to-newdevyml)
+  - [6. Deploy to New Dev](#6-deploy-to-new-dev-pipelinesdeploy-to-newdevyml)
+- [Pipeline Flow](#pipeline-flow)
+  - [Daily Export + Release](#daily-export--release-dev--qa--stage--prod)
+  - [Pre-Dev Promotion](#pre-dev-promotion-on-demand-dev--qa--stage--prod)
+  - [Architecture Overview](#architecture-overview)
+- [build.json Configuration](#buildjson-configuration)
+  - [Solutions Fields](#solutions-fields)
+  - [Config Data Fields](#config-data-fields)
+  - [Deployment Settings](#deployment-settings)
+  - [Post-Export Version Management](#post-export-version-management)
+  - [Configuration Data](#configuration-data)
+- [Testing](#testing)
+- [ADO Setup](#ado-setup)
+  - [Prerequisites](#prerequisites)
+  - [Step 1: Install Power Platform Build Tools](#step-1-install-the-power-platform-build-tools-extension)
+  - [Step 2: Register an App in Entra ID](#step-2-register-an-app-in-entra-id-azure-ad)
+  - [Step 3: Create Service Connections](#step-3-create-power-platform-service-connections)
+  - [Step 4: Create Variable Groups](#step-4-create-variable-groups-release--deploy-pipelines)
+  - [Step 5: Create ADO Environments](#step-5-create-ado-environments-release--deploy-pipelines)
+  - [Step 6: Create the Pipelines](#step-6-create-the-pipelines)
+  - [Step 7: Link Variable Groups to Pipelines](#step-7-link-variable-groups-to-pipelines)
+  - [Step 8: Update Pipeline Variables](#step-8-update-pipeline-variables)
+  - [Step 9: Grant Repository Permissions](#step-9-grant-repository-permissions)
+- [How to Execute](#how-to-execute)
+  - [Daily Export Solutions](#daily-export-solutions-scheduled)
+  - [Release Pipeline](#release-pipeline-automatic--manual-approval)
+  - [Export from Pre-Dev + Deploy](#export-from-pre-dev--deploy-on-demand)
+  - [Deploy Solution](#deploy-solution-manual)
+  - [Verifying Results](#verifying-results)
+- [Changing the Schedule](#changing-the-schedule)
+- [Troubleshooting](#troubleshooting)
+
+---
+
 ## Repository Structure
 
 ```
