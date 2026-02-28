@@ -1,0 +1,14 @@
+[
+  {
+    "cr123_countryid": "b2c3d4e5-0000-0000-0000-000000000001",
+    "cr123_name": "United States",
+    "cr123_isocode": "US",
+    "cr123_callingcode": "1"
+  },
+  {
+    "cr123_countryid": "b2c3d4e5-0000-0000-0000-000000000002",
+    "cr123_name": "Canada",
+    "cr123_isocode": "CA",
+    "cr123_callingcode": "1"
+  }
+]

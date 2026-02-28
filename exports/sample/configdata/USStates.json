@@ -1,0 +1,14 @@
+[
+  {
+    "cr123_stateid": "a1b2c3d4-0000-0000-0000-000000000001",
+    "cr123_name": "Alabama",
+    "cr123_abbreviation": "AL",
+    "cr123_fipscode": "01"
+  },
+  {
+    "cr123_stateid": "a1b2c3d4-0000-0000-0000-000000000002",
+    "cr123_name": "Alaska",
+    "cr123_abbreviation": "AK",
+    "cr123_fipscode": "02"
+  }
+]

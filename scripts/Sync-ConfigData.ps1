@@ -15,7 +15,8 @@
 #   -ConfigData     : Array of configData objects from build.json
 #   -EnvironmentUrl : Dataverse environment URL (e.g., https://org.crm.dynamics.com)
 #   -ApiHeaders     : Hashtable with Authorization and OData headers
-#   -SourceDir      : Repository root (used to resolve dataFile paths)
+#   -SourceDir      : Base directory used to resolve dataFile paths
+#                     (export folder during extract; artifact directory during upsert)
 # =============================================================================
 
 param(
