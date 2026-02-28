@@ -14,7 +14,6 @@ pp-ci-cd-pipelines/
 │   └── templates/
 │       ├── deploy-environment.yml        # Reusable deploy template (used by release pipeline)
 │       └── deploy-single-solution.yml    # Reusable deploy template (used by deploy pipeline)
-├── configData/                           # Extracted configuration data (populated by export)
 ├── deploymentSettings/
 │   ├── preDev/                              # Deployment settings for Pre-Dev exports
 │   │   ├── deploymentSettings_Dev.json      #   Applied when deploying to Dev
@@ -29,6 +28,8 @@ pp-ci-cd-pipelines/
 ├── exports/
 │   └── {yyyy-MM-dd-token}/
 │       ├── build.json                   # Export configuration per scheduled run
+│       ├── configdata/                  # Extracted configuration data (populated by export)
+│       │   └── {DataSetName}.json       #   One file per configData entry in build.json
 │       ├── deploymentSettings_QA.json   # Deployment settings for QA (optional)
 │       ├── deploymentSettings_Stage.json # Deployment settings for Stage (optional)
 │       └── deploymentSettings_Prod.json  # Deployment settings for Prod (optional)
@@ -80,10 +81,10 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
    - **Validates the version**: reads the actual version from `Other/Solution.xml` and compares it to `build.json`. If they don't match, the pipeline **fails** with an error
    - Exports the **managed** solution directly from Power Platform &rarr; `solutions/managed/`
 4. Writes the updated `build.json` (with the auto-detected `includesCloudFlows` flag) and publishes it along with managed zips, config data files, and any `deploymentSettings_*.json` files as pipeline artifacts (consumed by the release pipeline)
-5. **Extracts configuration data** &mdash; if `configData` is defined in `build.json`, queries each data set from Dev using OData `$select`/`$filter`, writes the results as JSON to `configData/`, and includes them in the artifact. See [Configuration Data](#configuration-data) for details.
+5. **Extracts configuration data** &mdash; if `configData` is defined in `build.json`, queries each data set from Dev using OData `$select`/`$filter`, writes the results as JSON to `configdata/` inside the export folder (alongside `build.json`), and includes them in the artifact. See [Configuration Data](#configuration-data) for details.
 6. **Post-export version management** &mdash; for each solution that has a `postExportVersion` defined in `build.json`, bumps that solution's version in the Dev environment after export. Solutions with `createNewPatch: true` have a new patch cloned from themselves at the new version via the Dataverse `CloneAsPatch` action; solutions with `createNewPatch: false` (or unset) get a direct version update via `pac solution online-version`. See [Post-Export Version Management](#post-export-version-management) for details.
 7. **Merges deployment settings** &mdash; if `deploymentSettings_*.json` files exist in the export folder, merges them into the root `deploymentSettings/` folder. Items from the export overwrite matching items in root (matched by `SchemaName` for environment variables, `LogicalName` for connection references); new items are appended. See [Deployment Settings](#deployment-settings) for details.
-8. Commits solution files, config data, and merged deployment settings, then pushes to the export branch
+8. Commits solution files, config data (in the export folder), and merged deployment settings, then pushes to the export branch
 9. Creates a Pull Request to `main`, sets auto-complete (squash merge), and deletes the source branch
 
 **Version validation:** During export, the `build.json` file is the source of truth for expected versions. If a solution's version in the Dev environment doesn't match what's in `build.json`, the pipeline fails immediately with a message like:
@@ -309,7 +310,7 @@ The `build.json` file defines which solutions to export and their **expected ver
       "primaryKey": "cr123_stateid",
       "select": "cr123_name,cr123_abbreviation,cr123_fipscode",
       "filter": "statecode eq 0",
-      "dataFile": "configData/USStates.json"
+      "dataFile": "configdata/USStates.json"
     }
   ]
 }
@@ -339,7 +340,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `configData[].primaryKey` | Primary key column name. The GUID in this column must be **stable across all environments** &mdash; the same record has the same GUID everywhere. |
 | `configData[].select` | Comma-separated list of columns to extract and upsert (OData `$select`). Do **not** include the primary key here &mdash; it is added automatically. |
 | `configData[].filter` | Optional OData `$filter` expression to scope which rows are extracted (e.g., `statecode eq 0`). Omit to extract all rows. |
-| `configData[].dataFile` | Path to the JSON data file relative to the repository root (e.g., `configData/USStates.json`). Created/updated by the export pipeline. |
+| `configData[].dataFile` | Path to the JSON data file relative to the export folder (e.g., `configdata/USStates.json`). Created/updated by the export pipeline inside the same folder as `build.json`. |
 
 **How versions work:**
 
@@ -490,12 +491,12 @@ Configuration data allows you to move reference/lookup data (such as US States, 
 
 1. Define one or more data sets in the `configData` array of `build.json`
 2. During the daily export, the pipeline queries each data set from Dev using OData (`$select` + optional `$filter`)
-3. Results are written as JSON files to `configData/` in the repository and included in the pipeline artifact
+3. Results are written as JSON files to `configdata/` inside the export folder (the same folder as `build.json`, e.g., `exports/2026-02-15-sprint42/configdata/`) and included in the pipeline artifact
 4. During deployment, the pipeline reads each data file and PATCHes every record into the target environment using the record's primary key GUID
 
 **Stable GUIDs:** This approach requires that the primary key GUID for each record is **the same across all environments**. When you create records in Dev, they get assigned GUIDs. Those exact GUIDs are used to create-or-update (upsert) records in QA, Stage, and Prod. The Dataverse Web API `PATCH /api/data/v9.2/{entity}({guid})` creates the record with that GUID if it doesn't exist, or updates it if it does.
 
-**Data file format** (`configData/USStates.json`):
+**Data file format** (`configdata/USStates.json`):
 
 ```json
 [
@@ -540,7 +541,7 @@ Config data upsert runs **after** solution imports because the target tables mus
 - The `entity` value must be the **plural** OData entity set name (e.g., `cr123_states`, not `cr123_state`)
 - The `primaryKey` column must contain a stable GUID that is identical across all environments
 - The `select` columns should not include the primary key &mdash; it is added automatically during extraction
-- Data files are committed to the export branch and included in the PR to `main`
+- Data files are committed to the export branch (inside the export folder) and included in the PR to `main`
 - Config data is included in the `ManagedSolutions` artifact alongside solution zips and deployment settings
 - The deploy-solution pipeline (pipeline 4) passes config data through the `DeploySolution` artifact chain from Dev to downstream stages
 

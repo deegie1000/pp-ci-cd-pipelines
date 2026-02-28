@@ -93,7 +93,7 @@ Describe "configData validation in build.json" {
             primaryKey = "cr123_stateid"
             select = "cr123_name,cr123_abbreviation"
             filter = "statecode eq 0"
-            dataFile = "configData/USStates.json"
+            dataFile = "configdata/USStates.json"
           }
         )
       }
@@ -116,7 +116,7 @@ Describe "configData validation in build.json" {
             entity = "cr123_countries"
             primaryKey = "cr123_countryid"
             select = "cr123_name,cr123_isocode"
-            dataFile = "configData/CountryCodes.json"
+            dataFile = "configdata/CountryCodes.json"
           }
         )
       }
@@ -137,14 +137,14 @@ Describe "configData validation in build.json" {
             entity = "cr123_states"
             primaryKey = "cr123_stateid"
             select = "cr123_name"
-            dataFile = "configData/USStates.json"
+            dataFile = "configdata/USStates.json"
           },
           @{
             name = "CountryCodes"
             entity = "cr123_countries"
             primaryKey = "cr123_countryid"
             select = "cr123_name"
-            dataFile = "configData/CountryCodes.json"
+            dataFile = "configdata/CountryCodes.json"
           }
         )
       }
@@ -163,7 +163,7 @@ Describe "configData validation in build.json" {
             entity = "cr123_states"
             primaryKey = "cr123_stateid"
             select = "cr123_name"
-            dataFile = "configData/USStates.json"
+            dataFile = "configdata/USStates.json"
           }
         )
       }
@@ -179,7 +179,7 @@ Describe "configData validation in build.json" {
             name = "USStates"
             primaryKey = "cr123_stateid"
             select = "cr123_name"
-            dataFile = "configData/USStates.json"
+            dataFile = "configdata/USStates.json"
           }
         )
       }
@@ -195,7 +195,7 @@ Describe "configData validation in build.json" {
             name = "USStates"
             entity = "cr123_states"
             select = "cr123_name"
-            dataFile = "configData/USStates.json"
+            dataFile = "configdata/USStates.json"
           }
         )
       }
@@ -211,7 +211,7 @@ Describe "configData validation in build.json" {
             name = "USStates"
             entity = "cr123_states"
             primaryKey = "cr123_stateid"
-            dataFile = "configData/USStates.json"
+            dataFile = "configdata/USStates.json"
           }
         )
       }
