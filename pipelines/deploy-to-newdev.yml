@@ -2,7 +2,7 @@
 # Pipeline: Deploy Power Platform Solutions to New Dev Environment
 # =============================================================================
 # Manually triggered. Downloads the NewDevSolutions artifact produced by
-# export-to-newdev.yml and imports every solution into a New Dev environment.
+# the export-for-new-dev pipeline and imports every solution into a New Dev environment.
 #
 # Solutions with isUnmanaged: true in build.json are imported as unmanaged.
 # Solutions with isUnmanaged: false (or omitted) are imported as managed using
@@ -20,20 +20,20 @@
 #      - TenantId        : Azure AD Tenant ID
 #   3. An ADO environment named "Power Platform NewDev"
 #      (add an approval check here if desired)
-#   4. The export-to-newdev pipeline registered in this ADO project so that
+#   4. The export-for-new-dev pipeline registered in this ADO project so that
 #      its artifact can be selected when running this pipeline
 # =============================================================================
 
 trigger: none
 
 # -----------------------------------------------------------------------------
-# Pipeline resource: select which export-to-newdev run to deploy from.
+# Pipeline resource: select which export-for-new-dev run to deploy from.
 # When running manually ADO will prompt you to choose a specific run.
 # -----------------------------------------------------------------------------
 resources:
   pipelines:
     - pipeline: ExportToNewDev
-      source: "export-to-newdev"
+      source: "export-for-new-dev"
       trigger: none
 
 # -----------------------------------------------------------------------------

@@ -13,7 +13,7 @@ Azure DevOps pipelines for exporting, versioning, and deploying Power Platform s
   - [2. Release Solutions](#2-release-solutions-pipelinesrelease-solutionsyml)
   - [3. Export Solution from Pre-Dev](#3-export-solution-from-pre-dev-pipelinesexport-solution-predevyml)
   - [4. Deploy Solution](#4-deploy-solution-pipelinesdeploy-solutionyml)
-  - [5. Export to New Dev](#5-export-to-new-dev-pipelinesexport-to-newdevyml)
+  - [5. Export for New Dev](#5-export-for-new-dev-pipelinesexport-to-newdevyml)
   - [6. Deploy to New Dev](#6-deploy-to-new-dev-pipelinesdeploy-to-newdevyml)
 - [Pipeline Flow](#pipeline-flow)
   - [Daily Export + Release](#daily-export--release-dev--qa--stage--prod)
@@ -74,8 +74,9 @@ pp-ci-cd-pipelines/
 │   ├── deploymentSettings_Stage.json        # Accumulated deployment settings for Stage (daily export)
 │   └── deploymentSettings_Prod.json         # Accumulated deployment settings for Prod (daily export)
 ├── exports/
-│   └── {yyyy-MM-dd-token}/
-│       ├── build.json                   # Export configuration per scheduled run
+│   ├── {yyyy-MM-dd-token}/              # Daily export (export/yyyy-MM-dd-{token} branches)
+│   └── {token}/                         # New Dev export (export/{token} branches)
+│       ├── build.json                   # Export configuration for that run
 │       ├── configdata/                  # Extracted configuration data (populated by export)
 │       │   └── {DataSetName}.json       #   One file per configData entry in build.json
 │       ├── deploymentSettings_QA.json   # Deployment settings for QA (optional)
@@ -107,7 +108,7 @@ pp-ci-cd-pipelines/
 | 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod |
 | 3 | [Export from Pre-Dev](#3-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
 | 4 | [Deploy Solution](#4-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution through Dev &rarr; QA &rarr; Stage &rarr; Prod |
-| 5 | [Export to New Dev](#5-export-to-new-dev) | Manual | Export solutions from Dev to seed a new Dev environment (supports `isUnmanaged`) |
+| 5 | [Export for New Dev](#5-export-for-new-dev) | Manual | Export solutions from Dev to seed a new Dev environment (supports `isUnmanaged`) |
 | 6 | [Deploy to New Dev](#6-deploy-to-new-dev) | Manual | Deploy the New Dev artifact into a fresh New Dev environment |
 
 ---
@@ -263,7 +264,7 @@ QA, Stage, and Prod approvals are controlled by **ADO Environment approval check
 
 ---
 
-### 5. Export to New Dev (`pipelines/export-to-newdev.yml`)
+### 5. Export for New Dev (`pipelines/export-to-newdev.yml`)
 
 Manual pipeline used to **seed or refresh a New Dev environment**. Checks out a specified export branch, exports solutions from Dev (respecting the `isUnmanaged` flag per solution), extracts config data, commits back to the export branch, opens a PR to `main`, and publishes a `NewDevSolutions` artifact consumed by **Deploy to New Dev**.
 
@@ -284,7 +285,7 @@ Manual pipeline used to **seed or refresh a New Dev environment**. Checks out a 
 
 | Parameter | Description |
 |---|---|
-| `exportBranch` | **Required.** The export branch containing `build.json` (e.g. `export/2026-02-28-sprint42`). The subfolder is derived automatically by stripping the `export/` prefix. |
+| `exportBranch` | **Required.** The export branch containing `build.json` (e.g. `export/sprint42`). The subfolder is derived automatically by stripping the `export/` prefix. |
 
 **Auth:** Uses pac CLI with credentials from the `PowerPlatform-Dev` variable group.
 
@@ -292,7 +293,7 @@ Manual pipeline used to **seed or refresh a New Dev environment**. Checks out a 
 
 ### 6. Deploy to New Dev (`pipelines/deploy-to-newdev.yml`)
 
-Manual pipeline that downloads the `NewDevSolutions` artifact from a chosen **Export to New Dev** run and imports every solution into a **New Dev** environment. When running this pipeline, ADO prompts you to select which export run to deploy from.
+Manual pipeline that downloads the `NewDevSolutions` artifact from a chosen **Export for New Dev** run and imports every solution into a **New Dev** environment. When running this pipeline, ADO prompts you to select which export run to deploy from.
 
 **What it does:**
 
@@ -431,7 +432,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
 | `solutions[].isExisting` | Optional boolean (default: `false`). If `true`, the export pipeline skips exporting this solution from Power Platform and uses the managed zip already present in `solutions/managed/{name}_{version}.zip`. Use this when the zip is already committed to the repo and no re-export is needed. The pipeline fails if the zip is not found. |
 | `solutions[].isRollback` | Optional boolean (default: `false`). If `true`, the deploy pipelines omit `--skip-lower-version` when importing this solution, allowing a lower (rollback) version to be installed over a higher one. Applies to all stages (Dev, QA, Stage, Prod). |
-| `solutions[].isUnmanaged` | Optional boolean (default: `false`). **Used only by the New Dev pipelines.** If `true`, `export-to-newdev` stages the unmanaged zip in the artifact instead of the managed zip, and `deploy-to-newdev` imports it as unmanaged (direct import, no staged upgrade). Ignored by all other pipelines. |
+| `solutions[].isUnmanaged` | Optional boolean (default: `false`). **Used only by the New Dev pipelines.** If `true`, `export-for-new-dev` stages the unmanaged zip in the artifact instead of the managed zip, and `deploy-to-newdev` imports it as unmanaged (direct import, no staged upgrade). Ignored by all other pipelines. |
 
 ### Config Data Fields
 
@@ -813,13 +814,13 @@ Create pipelines in this order:
 | 2 | `pipelines/release-solutions.yml` | `release-solutions` |
 | 3 | `pipelines/export-solution-predev.yml` | `Export Solution from Pre-Dev` |
 | 4 | `pipelines/deploy-solution.yml` | `deploy-solution` |
-| 5 | `pipelines/export-to-newdev.yml` | `export-to-newdev` |
+| 5 | `pipelines/export-to-newdev.yml` | `export-for-new-dev` |
 | 6 | `pipelines/deploy-to-newdev.yml` | `deploy-to-newdev` |
 
 > **Important:** Pipeline names matter for cross-pipeline triggers and artifact downloads:
 > - The **release pipeline** references the export pipeline as `source: "export-solutions"`. The export pipeline's name in ADO must match this value.
 > - The **deploy pipeline** references the pre-dev export as `source: "Export Solution from Pre-Dev"`. Update if your pipeline name differs.
-> - The **deploy-to-newdev pipeline** references the export-to-newdev pipeline as `source: "export-to-newdev"`. The export pipeline's name in ADO must match this value.
+> - The **deploy-to-newdev pipeline** references the export-for-new-dev pipeline as `source: "export-for-new-dev"`. The export pipeline's name in ADO must match this value.
 
 ### Step 7: Link Variable Groups to Pipelines
 
@@ -832,7 +833,7 @@ Each pipeline must be authorized to use its variable group(s). After creating th
 | Variable Group | Used By |
 |---|---|
 | `PowerPlatform-PreDev` | Export Solution from Pre-Dev |
-| `PowerPlatform-Dev` | Daily Export Solutions, Deploy Solution (Dev stage), Export to New Dev |
+| `PowerPlatform-Dev` | Daily Export Solutions, Deploy Solution (Dev stage), Export for New Dev |
 | `PowerPlatform-QA` | Release Solutions, Deploy Solution (QA stage) |
 | `PowerPlatform-Stage` | Release Solutions, Deploy Solution (Stage stage) |
 | `PowerPlatform-Prod` | Release Solutions, Deploy Solution (Prod stage) |

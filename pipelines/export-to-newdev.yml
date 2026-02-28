@@ -6,8 +6,8 @@
 # back to the export branch, opens a PR to main, and publishes a
 # "NewDevSolutions" artifact consumed by deploy-to-newdev.yml.
 #
-# Branch naming convention: export/yyyy-MM-dd-{token}
-# Configuration file:       exports/{yyyy-MM-dd-token}/build.json
+# Branch naming convention: export/{token}
+# Configuration file:       exports/{token}/build.json
 #
 # Prerequisites:
 #   1. Power Platform Build Tools extension installed in the ADO org
@@ -28,7 +28,7 @@ trigger: none
 # -----------------------------------------------------------------------------
 parameters:
   - name: exportBranch
-    displayName: "Export branch containing build.json (e.g. export/2026-02-28-sprint42)"
+    displayName: "Export branch containing build.json (e.g. export/sprint42)"
     type: string
 
 # -----------------------------------------------------------------------------
@@ -575,11 +575,11 @@ steps:
       $description = (
         "## New Dev Environment Export`n`n" +
         "**Branch:** ``$(ExportBranch)```n" +
-        "**Date:** $(ExportSubfolder)`n`n" +
+        "**Identifier:** $(ExportSubfolder)`n`n" +
         "### Solutions`n" +
         "$solutionBullets`n`n" +
         "---`n" +
-        "*Created automatically by the export-to-newdev pipeline.*"
+        "*Created automatically by the export-for-new-dev pipeline.*"
       )
 
       $prBody = @{
