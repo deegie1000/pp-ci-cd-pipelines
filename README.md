@@ -104,7 +104,7 @@ pp-ci-cd-pipelines/
 
 | # | Pipeline | Trigger | Purpose |
 |---|----------|---------|---------|
-| 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET daily) | Export from Dev, validate versions, export managed, PR to main |
+| 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET) or manual | Export from Dev, validate versions, export managed, PR to main |
 | 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod |
 | 3 | [Export from Pre-Dev](#3-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
 | 4 | [Deploy Solution](#4-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution through Dev &rarr; QA &rarr; Stage &rarr; Prod |
@@ -153,8 +153,8 @@ If `postExportVersion` is set, the pipeline bumps versions in Dev **after** the 
 
 | Parameter | Description |
 |---|---|
-| `exportBranch` | Override export branch name (skip auto-detect) |
-| `dateOverride` | Override date for branch detection (yyyy-MM-dd) |
+| `exportBranch` | Override export branch name (skip auto-detect). Leave blank or type `default` to auto-detect. |
+| `dateOverride` | Override date for branch detection (yyyy-MM-dd). Leave blank or type `default` to use today's date. |
 
 **Auth:** Uses pac CLI with secret pipeline variables (`ClientId`, `ClientSecret`, `TenantId`).
 
@@ -875,7 +875,7 @@ The pipeline's build service identity needs permissions to push commits and crea
 
 ### Daily Export Solutions (Scheduled)
 
-The daily pipeline runs automatically every day at **10:00 PM ET**. No action is needed beyond the initial setup. The pipeline will:
+The pipeline runs automatically every day at **10:00 PM ET**, but can also be triggered manually on demand from the ADO UI. The pipeline will:
 - Check if an export branch exists for today's date
 - Skip gracefully (with a warning) if no matching branch is found
 - Process all solutions and merge if a branch is found
