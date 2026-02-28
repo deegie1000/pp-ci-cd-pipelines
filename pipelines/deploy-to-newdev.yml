@@ -1,0 +1,480 @@
+# =============================================================================
+# Pipeline: Deploy Power Platform Solutions to New Dev Environment
+# =============================================================================
+# Manually triggered. Downloads the NewDevSolutions artifact produced by
+# export-to-newdev.yml and imports every solution into a New Dev environment.
+#
+# Solutions with isUnmanaged: true in build.json are imported as unmanaged.
+# Solutions with isUnmanaged: false (or omitted) are imported as managed using
+# staged upgrade when upgrading an existing installation.
+#
+# Deployment settings are read from deploymentSettings/deploymentSettings_Dev.json
+# in the repository for solutions with includeDeploymentSettings: true.
+#
+# Prerequisites:
+#   1. Power Platform Build Tools extension installed in the ADO org
+#   2. A variable group named "PowerPlatform-NewDev" with:
+#      - EnvironmentUrl  : New Dev environment URL
+#      - ClientId        : Service Principal Application (Client) ID
+#      - ClientSecret    : Service Principal Client Secret (mark as secret)
+#      - TenantId        : Azure AD Tenant ID
+#   3. An ADO environment named "Power Platform NewDev"
+#      (add an approval check here if desired)
+#   4. The export-to-newdev pipeline registered in this ADO project so that
+#      its artifact can be selected when running this pipeline
+# =============================================================================
+
+trigger: none
+
+# -----------------------------------------------------------------------------
+# Pipeline resource: select which export-to-newdev run to deploy from.
+# When running manually ADO will prompt you to choose a specific run.
+# -----------------------------------------------------------------------------
+resources:
+  pipelines:
+    - pipeline: ExportToNewDev
+      source: "export-to-newdev"
+      trigger: none
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  - group: PowerPlatform-NewDev
+
+  # Set to "true" in the Run pipeline dialog to validate without importing.
+  - name: dryRun
+    value: "false"
+
+pool:
+  vmImage: "windows-latest"
+
+stages:
+  # ===========================================================================
+  # Deploy to New Dev
+  # ===========================================================================
+  - stage: NewDev
+    displayName: "Deploy to New Dev"
+    jobs:
+      - deployment: Deploy
+        displayName: "Deploy solutions to New Dev"
+        environment: "Power Platform NewDev"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # ===============================================================
+                # Download NewDevSolutions artifact from the chosen export run
+                # ===============================================================
+                - download: ExportToNewDev
+                  artifact: NewDevSolutions
+                  displayName: "Download NewDevSolutions artifact"
+
+                # ===============================================================
+                # Install Power Platform Build Tools
+                # ===============================================================
+                - task: PowerPlatformToolInstaller@2
+                  displayName: "Install Power Platform Build Tools"
+
+                # ===============================================================
+                # Install pac CLI
+                # ===============================================================
+                - pwsh: dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+                  displayName: "Install pac CLI"
+
+                # ===============================================================
+                # Authenticate pac CLI with the New Dev environment
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "Authenticating with: $(EnvironmentUrl)"
+
+                    pac auth create `
+                      --environment "$(EnvironmentUrl)" `
+                      --applicationId "$(ClientId)" `
+                      --clientSecret "$(ClientSecret)" `
+                      --tenant "$(TenantId)"
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to authenticate with Power Platform"
+                      exit 1
+                    }
+
+                    Write-Host "Successfully authenticated."
+                    pac auth list
+                  displayName: "Authenticate with Power Platform"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Checkout repository (for scripts and deployment settings)
+                # ===============================================================
+                - checkout: self
+
+                # ===============================================================
+                # Deploy solutions in build.json order
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    $dryRun = "$(dryRun)" -eq "true"
+                    if ($dryRun) {
+                      Write-Host ""
+                      Write-Host "============================================"
+                      Write-Host "  DRY RUN MODE — no changes will be made"
+                      Write-Host "============================================"
+                      Write-Host ""
+                    }
+
+                    # -----------------------------------------------------------
+                    # Read build.json from artifact
+                    # -----------------------------------------------------------
+                    $artifactDir  = "$(Pipeline.Workspace)/ExportToNewDev/NewDevSolutions"
+                    $buildJsonPath = Join-Path $artifactDir "build.json"
+
+                    if (-not (Test-Path $buildJsonPath)) {
+                      Write-Error "build.json not found in artifact at: $buildJsonPath"
+                      exit 1
+                    }
+
+                    $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+                    $solutions   = $buildConfig.solutions
+
+                    if (-not $solutions -or $solutions.Count -eq 0) {
+                      Write-Error "No solutions specified in build.json"
+                      exit 1
+                    }
+
+                    Write-Host "Solutions to deploy ($($solutions.Count)):"
+                    foreach ($s in $solutions) {
+                      $u = if ($s.PSObject.Properties["isUnmanaged"] -and $s.isUnmanaged) { " [unmanaged]" } else { "" }
+                      Write-Host "  - $($s.name) (v$($s.version))$u"
+                    }
+
+                    # -----------------------------------------------------------
+                    # Validate all artifact zips exist before importing anything
+                    # -----------------------------------------------------------
+                    Write-Host "`nValidating all solution artifacts..."
+                    $missingArtifacts = @()
+
+                    foreach ($solution in $solutions) {
+                      $zipPath = Join-Path $artifactDir "$($solution.name)_$($solution.version).zip"
+                      if (-not (Test-Path $zipPath)) {
+                        Write-Host "  MISSING: $($solution.name)_$($solution.version).zip"
+                        $missingArtifacts += "$($solution.name)_$($solution.version).zip"
+                      } else {
+                        Write-Host "  OK:      $($solution.name)_$($solution.version).zip"
+                      }
+                    }
+
+                    if ($missingArtifacts.Count -gt 0) {
+                      Write-Error "Artifact validation failed — $($missingArtifacts.Count) zip(s) missing. No solutions were imported."
+                      exit 1
+                    }
+
+                    Write-Host "All artifacts validated."
+
+                    # -----------------------------------------------------------
+                    # Query installed solutions in New Dev
+                    # -----------------------------------------------------------
+                    Write-Host "`nQuerying installed solutions..."
+                    $listJson = (pac solution list --json) | Out-String
+
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Failed to list solutions in target environment"
+                      exit 1
+                    }
+
+                    $installedList = @($listJson | ConvertFrom-Json)
+                    $installed = @{}
+                    foreach ($s in $installedList) {
+                      $key = if ($s.PSObject.Properties['solutionUniqueName']) { $s.solutionUniqueName }
+                             else { $s.uniqueName }
+                      $ver = if ($s.PSObject.Properties['version']) { $s.version }
+                             else { $s.versionNumber }
+                      if ($key) { $installed[$key] = $ver }
+                    }
+
+                    Write-Host "Found $($installed.Count) solutions in New Dev."
+                    foreach ($key in $installed.Keys) {
+                      Write-Host "  $key = v$($installed[$key])"
+                    }
+
+                    # -----------------------------------------------------------
+                    # Acquire OAuth token for Dataverse API (cloud flow activation)
+                    # -----------------------------------------------------------
+                    $envUrl   = "$(EnvironmentUrl)".TrimEnd("/")
+                    $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+                    $tokenBody = @{
+                      grant_type    = "client_credentials"
+                      client_id     = "$(ClientId)"
+                      client_secret = $env:ClientSecret
+                      scope         = "$envUrl/.default"
+                    }
+
+                    $hasApiToken = $false
+                    try {
+                      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+                      $apiHeaders = @{
+                        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+                        "OData-MaxVersion" = "4.0"
+                        "OData-Version"    = "4.0"
+                        "Content-Type"     = "application/json"
+                        "Accept"           = "application/json"
+                      }
+                      $hasApiToken = $true
+                      Write-Host "Acquired Dataverse API token."
+                    } catch {
+                      Write-Host "##vso[task.logissue type=warning]Could not acquire Dataverse token for flow activation: $_"
+                    }
+
+                    # -----------------------------------------------------------
+                    # Deployment settings path (from repo, used when
+                    # includeDeploymentSettings: true on a solution)
+                    # -----------------------------------------------------------
+                    $repoDir         = "$(Build.SourcesDirectory)"
+                    $devSettingsFile = Join-Path $repoDir "deploymentSettings/deploymentSettings_Dev.json"
+
+                    # -----------------------------------------------------------
+                    # Deploy each solution in order
+                    # -----------------------------------------------------------
+                    $failedSolutions   = @()
+                    $skippedSolutions  = @()
+                    $deployedSolutions = @()
+                    $flowWarnings      = @()
+
+                    foreach ($solution in $solutions) {
+                      $name    = $solution.name
+                      $version = $solution.version
+                      $zipPath = Join-Path $artifactDir "${name}_${version}.zip"
+
+                      $isUnmanaged = $false
+                      if ($solution.PSObject.Properties["isUnmanaged"]) {
+                        $isUnmanaged = [bool]$solution.isUnmanaged
+                      }
+
+                      $isRollback = $false
+                      if ($solution.PSObject.Properties["isRollback"]) {
+                        $isRollback = [bool]$solution.isRollback
+                      }
+
+                      Write-Host ""
+                      Write-Host "============================================"
+                      Write-Host "  Solution: $name (v$version)  [isUnmanaged: $isUnmanaged]"
+                      Write-Host "============================================"
+
+                      if ($isRollback) {
+                        Write-Host "  isRollback = true — version guard bypassed."
+                      }
+
+                      # Version guard: skip if already at target version
+                      $isUpgrade = $false
+                      if ($installed.ContainsKey($name)) {
+                        $installedVersion = $installed[$name]
+                        if ($installedVersion -eq $version) {
+                          Write-Host "  Already at v$version — skipping."
+                          $skippedSolutions += $name
+                          continue
+                        }
+
+                        try {
+                          if (([Version]$installedVersion) -gt ([Version]$version) -and -not $isRollback) {
+                            Write-Host "  Installed v$installedVersion > target v$version — skipping (not a rollback)."
+                            $skippedSolutions += $name
+                            continue
+                          }
+                        } catch {
+                          Write-Host "##vso[task.logissue type=warning]Could not compare versions — proceeding."
+                        }
+
+                        Write-Host "  Currently installed: v$installedVersion"
+                        $isUpgrade = $true
+                      } else {
+                        Write-Host "  Not currently installed — fresh install."
+                      }
+
+                      # ---------------------------------------------------------
+                      # Build import arguments
+                      # ---------------------------------------------------------
+                      $importArgs = @(
+                        "solution", "import",
+                        "--path", $zipPath,
+                        "--activate-plugins",
+                        "--async",
+                        "--max-async-wait-time", "60"
+                      )
+
+                      if ($isUnmanaged) {
+                        # Unmanaged: direct import only (staged upgrade not applicable)
+                        Write-Host "  Importing as unmanaged..."
+                      } else {
+                        # Managed: staged upgrade when upgrading (same as release pipeline)
+                        Write-Host "  Importing as managed..."
+                        if ($isUpgrade -and -not $isRollback) {
+                          $importArgs += "--stage-and-upgrade"
+                          $importArgs += "--skip-lower-version"
+                        }
+                      }
+
+                      # Apply deployment settings if requested
+                      $includeSettings = $false
+                      if ($solution.PSObject.Properties["includeDeploymentSettings"]) {
+                        $includeSettings = [bool]$solution.includeDeploymentSettings
+                      }
+
+                      if ($includeSettings) {
+                        if (Test-Path $devSettingsFile) {
+                          Write-Host "  Applying deployment settings: deploymentSettings_Dev.json"
+                          $importArgs += @("--settings-file", $devSettingsFile)
+                        } else {
+                          Write-Host "##vso[task.logissue type=warning]includeDeploymentSettings=true but deploymentSettings/deploymentSettings_Dev.json not found — skipping settings."
+                        }
+                      }
+
+                      if ($dryRun) {
+                        Write-Host "  [DRY RUN] Would execute: pac $($importArgs -join ' ')"
+                        $deployedSolutions += $name
+                        continue
+                      }
+
+                      & pac @importArgs
+
+                      if ($LASTEXITCODE -ne 0) {
+                        Write-Error "Failed to import solution: $name"
+                        $failedSolutions += $name
+                        continue
+                      }
+
+                      Write-Host "  Successfully deployed."
+                      $deployedSolutions += $name
+
+                      # ---------------------------------------------------------
+                      # Activate cloud flows
+                      # ---------------------------------------------------------
+                      $hasCloudFlows = $false
+                      if ($solution.PSObject.Properties["includesCloudFlows"]) {
+                        $hasCloudFlows = [bool]$solution.includesCloudFlows
+                      }
+
+                      if ($hasCloudFlows -and $hasApiToken) {
+                        Write-Host "  Checking cloud flow statuses..."
+                        try {
+                          $solQuery  = "$envUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid"
+                          $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
+                          $solutionId = $solResult.value[0].solutionid
+
+                          $compQuery = "$envUrl/api/data/v9.2/solutioncomponents?`$filter=_solutionid_value eq $solutionId and componenttype eq 29&`$select=objectid"
+                          $compResult = Invoke-RestMethod -Uri $compQuery -Headers $apiHeaders
+                          $workflowIds = @($compResult.value | ForEach-Object { $_.objectid })
+
+                          $activatedCount = 0
+                          foreach ($wfId in $workflowIds) {
+                            try {
+                              $wf = Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/workflows($wfId)?`$select=name,category,statecode" -Headers $apiHeaders
+                              if ($wf.category -ne 5) { continue }
+                              if ($wf.statecode -eq 1) { Write-Host "    Flow '$($wf.name)' already on."; continue }
+                              Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/workflows($wfId)" -Method Patch -Headers $apiHeaders -Body '{"statecode": 1}'
+                              Write-Host "    Flow '$($wf.name)' activated."
+                              $activatedCount++
+                            } catch {
+                              $fn = if ($wf -and $wf.name) { $wf.name } else { $wfId }
+                              Write-Host "##vso[task.logissue type=warning]Failed to activate flow '$fn': $($_.Exception.Message)"
+                              $flowWarnings += @{ Solution = $name; Flow = $fn; Error = $_.Exception.Message }
+                            }
+                          }
+
+                          if ($activatedCount -gt 0) { Write-Host "    Activated $activatedCount flow(s)." }
+                        } catch {
+                          Write-Host "##vso[task.logissue type=warning]Failed to check/activate flows for '$name': $($_.Exception.Message)"
+                          $flowWarnings += @{ Solution = $name; Flow = "(all)"; Error = $_.Exception.Message }
+                        }
+                      }
+                    }
+
+                    # -----------------------------------------------------------
+                    # Summary
+                    # -----------------------------------------------------------
+                    Write-Host ""
+                    Write-Host "============================================"
+                    Write-Host "  Deployment Summary — New Dev"
+                    Write-Host "============================================"
+                    if ($dryRun) { Write-Host "  Mode: DRY RUN" }
+                    Write-Host "Total:    $($solutions.Count)"
+                    Write-Host "Deployed: $($deployedSolutions.Count)"
+                    Write-Host "Skipped:  $($skippedSolutions.Count)"
+                    Write-Host "Failed:   $($failedSolutions.Count)"
+
+                    if ($skippedSolutions.Count -gt 0) {
+                      Write-Host "Skipped (already at target version): $($skippedSolutions -join ', ')"
+                    }
+
+                    if ($flowWarnings.Count -gt 0) {
+                      Write-Host "Cloud flow warnings: $($flowWarnings.Count)"
+                      foreach ($fw in $flowWarnings) {
+                        Write-Host "  - [$($fw.Solution)] $($fw.Flow): $($fw.Error)"
+                      }
+                    }
+
+                    if ($failedSolutions.Count -gt 0) {
+                      Write-Error "One or more solutions failed to deploy"
+                      exit 1
+                    }
+
+                    Write-Host "`nAll solutions deployed to New Dev."
+                  displayName: "Deploy solutions"
+                  env:
+                    ClientSecret: $(ClientSecret)
+
+                # ===============================================================
+                # Upsert configuration data (if configData defined in build.json)
+                # ===============================================================
+                - pwsh: |
+                    $ErrorActionPreference = "Stop"
+
+                    $dryRun = "$(dryRun)" -eq "true"
+                    if ($dryRun) {
+                      Write-Host "[DRY RUN] Skipping config data upsert."
+                      exit 0
+                    }
+
+                    $artifactDir   = "$(Pipeline.Workspace)/ExportToNewDev/NewDevSolutions"
+                    $buildJsonPath = Join-Path $artifactDir "build.json"
+                    $buildConfig   = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
+
+                    if (-not $buildConfig.PSObject.Properties["configData"] -or $buildConfig.configData.Count -eq 0) {
+                      Write-Host "No configData defined in build.json — skipping."
+                      exit 0
+                    }
+
+                    $configData = @($buildConfig.configData)
+                    $envUrl     = "$(EnvironmentUrl)".TrimEnd("/")
+
+                    $tokenUrl  = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+                    $tokenBody = @{
+                      grant_type    = "client_credentials"
+                      client_id     = "$(ClientId)"
+                      client_secret = $env:ClientSecret
+                      scope         = "$envUrl/.default"
+                    }
+
+                    $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+                    $apiHeaders = @{
+                      "Authorization"    = "Bearer $($tokenResponse.access_token)"
+                      "OData-MaxVersion" = "4.0"
+                      "OData-Version"    = "4.0"
+                      "Content-Type"     = "application/json"
+                      "Accept"           = "application/json"
+                    }
+
+                    $syncScript = "$(Build.SourcesDirectory)/scripts/Sync-ConfigData.ps1"
+                    & $syncScript `
+                      -Mode Upsert `
+                      -ConfigData $configData `
+                      -EnvironmentUrl $envUrl `
+                      -ApiHeaders $apiHeaders `
+                      -SourceDir $artifactDir
+                  displayName: "Upsert config data"
+                  env:
+                    ClientSecret: $(ClientSecret)
+                  continueOnError: true
