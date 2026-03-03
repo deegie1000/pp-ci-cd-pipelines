@@ -11,10 +11,11 @@ Azure DevOps pipelines for exporting, versioning, and deploying Power Platform s
 - [Pipelines](#pipelines)
   - [1. Daily Export Solutions](#1-daily-export-solutions-pipelinesexport-solutionsyml)
   - [2. Release Solutions](#2-release-solutions-pipelinesrelease-solutionsyml)
-  - [3. Export Solution from Pre-Dev](#3-export-solution-from-pre-dev-pipelinesexport-solution-predevyml)
-  - [4. Deploy Solution](#4-deploy-solution-pipelinesdeploy-solutionyml)
-  - [5. Export for New Dev](#5-export-for-new-dev-pipelinesexport-to-newdevyml)
-  - [6. Deploy to New Dev](#6-deploy-to-new-dev-pipelinesdeploy-to-newdevyml)
+  - [3. Release Ad-Hoc](#3-release-ad-hoc-pipelinesrelease-adhocyml)
+  - [4. Export Solution from Pre-Dev](#4-export-solution-from-pre-dev-pipelinesexport-solution-predevyml)
+  - [5. Deploy Solution](#5-deploy-solution-pipelinesdeploy-solutionyml)
+  - [6. Export for New Dev](#6-export-for-new-dev-pipelinesexport-to-newdevyml)
+  - [7. Deploy to New Dev](#7-deploy-to-new-dev-pipelinesdeploy-to-newdevyml)
 - [Pipeline Flow](#pipeline-flow)
   - [Daily Export + Release](#daily-export--release-dev--qa--stage--prod)
   - [Pre-Dev Promotion](#pre-dev-promotion-on-demand-dev--qa--stage--prod)
@@ -40,6 +41,7 @@ Azure DevOps pipelines for exporting, versioning, and deploying Power Platform s
 - [How to Execute](#how-to-execute)
   - [Daily Export Solutions](#daily-export-solutions-scheduled)
   - [Release Pipeline](#release-pipeline-automatic--manual-approval)
+  - [Release Ad-Hoc](#release-ad-hoc-manual)
   - [Export from Pre-Dev + Deploy](#export-from-pre-dev--deploy-on-demand)
   - [Deploy Solution](#deploy-solution-manual)
   - [Verifying Results](#verifying-results)
@@ -55,6 +57,7 @@ pp-ci-cd-pipelines/
 ├── pipelines/
 │   ├── export-solutions.yml             # Daily scheduled export (Dev → repo)
 │   ├── release-solutions.yml            # Release pipeline (QA → Stage → Prod)
+│   ├── release-adhoc.yml                # Ad-hoc release to any environment
 │   ├── export-solution-predev.yml       # On-demand single solution export (Pre-Dev)
 │   ├── deploy-solution.yml              # Multi-stage deploy (Dev → QA → Stage → Prod)
 │   ├── export-to-newdev.yml             # Manual export from Dev to seed a New Dev environment
@@ -106,10 +109,11 @@ pp-ci-cd-pipelines/
 |---|----------|---------|---------|
 | 1 | [Daily Export Solutions](#1-daily-export-solutions) | Scheduled (10 PM ET) or manual | Export from Dev, validate versions, export managed, PR to main |
 | 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod |
-| 3 | [Export from Pre-Dev](#3-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
-| 4 | [Deploy Solution](#4-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution through Dev &rarr; QA &rarr; Stage &rarr; Prod |
-| 5 | [Export for New Dev](#5-export-for-new-dev) | Manual | Export solutions from Dev to seed a new Dev environment (supports `isUnmanaged`) |
-| 6 | [Deploy to New Dev](#6-deploy-to-new-dev) | Manual | Deploy the New Dev artifact into a fresh New Dev environment |
+| 3 | [Release Ad-Hoc](#3-release-ad-hoc) | Manual | Deploy any export run to a named environment and variable group |
+| 4 | [Export from Pre-Dev](#4-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
+| 5 | [Deploy Solution](#5-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution through Dev &rarr; QA &rarr; Stage &rarr; Prod |
+| 6 | [Export for New Dev](#6-export-for-new-dev) | Manual | Export solutions from Dev to seed a new Dev environment (supports `isUnmanaged`) |
+| 7 | [Deploy to New Dev](#7-deploy-to-new-dev) | Manual | Deploy the New Dev artifact into a fresh New Dev environment |
 
 ---
 
@@ -204,7 +208,32 @@ Stage and Prod approvals are controlled by **ADO Environment approval checks** (
 
 ---
 
-### 3. Export Solution from Pre-Dev (`pipelines/export-solution-predev.yml`)
+### 3. Release Ad-Hoc (`pipelines/release-adhoc.yml`)
+
+Manually triggered pipeline that deploys solutions from **any completed `export-solutions` run** into a **named environment and variable group**. Use this for environments outside the standard QA → Stage → Prod chain — such as sandboxes, UAT, or hotfix environments.
+
+**What it does:**
+
+1. Downloads the `ManagedSolutions` artifact from the selected export run
+2. Validates all artifacts, authenticates, queries installed solutions, and deploys using the same logic as [Release Solutions](#2-release-solutions)
+3. Applies `deploymentSettings_{variableGroup}.json` from the artifact if present (e.g., `deploymentSettings_PowerPlatform-Sandbox.json`)
+
+**Parameters:**
+
+| Parameter | Description |
+|---|---|
+| `environmentName` | The ADO Environment name to deploy into (e.g., `Power Platform Sandbox`). Must exist in your ADO project. |
+| `variableGroup` | The library variable group containing credentials for the target environment (e.g., `PowerPlatform-Sandbox`). Also used as the deployment settings file key. |
+
+**Trigger:** Manual only &mdash; no auto-trigger.
+
+**Auth:** Uses credentials from the variable group specified at runtime.
+
+**Template:** Uses `pipelines/templates/deploy-environment.yml`.
+
+---
+
+### 4. Export Solution from Pre-Dev (`pipelines/export-solution-predev.yml`)
 
 On-demand pipeline that exports a **single solution** from the **Pre-Dev** environment and promotes it through the build process.
 
@@ -225,7 +254,7 @@ On-demand pipeline that exports a **single solution** from the **Pre-Dev** envir
 
 ---
 
-### 4. Deploy Solution (`pipelines/deploy-solution.yml`)
+### 5. Deploy Solution (`pipelines/deploy-solution.yml`)
 
 Multi-stage pipeline that deploys a single managed solution through all environments in sequence: **Dev &rarr; QA &rarr; Stage &rarr; Prod**. Runs automatically after the Pre-Dev export pipeline completes, or can be triggered manually.
 
@@ -263,7 +292,7 @@ QA, Stage, and Prod approvals are controlled by **ADO Environment approval check
 
 ---
 
-### 5. Export for New Dev (`pipelines/export-to-newdev.yml`)
+### 6. Export for New Dev (`pipelines/export-to-newdev.yml`)
 
 Manual pipeline used to **seed or refresh a New Dev environment**. Checks out a specified export branch, exports solutions from Dev (respecting the `isUnmanaged` flag per solution), extracts config data, commits back to the export branch, opens a PR to `main`, and publishes a `NewDevSolutions` artifact consumed by **Deploy to New Dev**.
 
@@ -290,7 +319,7 @@ Manual pipeline used to **seed or refresh a New Dev environment**. Checks out a 
 
 ---
 
-### 6. Deploy to New Dev (`pipelines/deploy-to-newdev.yml`)
+### 7. Deploy to New Dev (`pipelines/deploy-to-newdev.yml`)
 
 Manual pipeline that downloads the `NewDevSolutions` artifact from a chosen **Export for New Dev** run and imports every solution into a **New Dev** environment. When running this pipeline, ADO prompts you to select which export run to deploy from.
 
@@ -811,13 +840,14 @@ Create pipelines in this order:
 |---|---|---|
 | 1 | `pipelines/export-solutions.yml` | `export-solutions` |
 | 2 | `pipelines/release-solutions.yml` | `release-solutions` |
-| 3 | `pipelines/export-solution-predev.yml` | `Export Solution from Pre-Dev` |
-| 4 | `pipelines/deploy-solution.yml` | `deploy-solution` |
-| 5 | `pipelines/export-to-newdev.yml` | `export-for-new-dev` |
-| 6 | `pipelines/deploy-to-newdev.yml` | `deploy-to-newdev` |
+| 3 | `pipelines/release-adhoc.yml` | `release-adhoc` |
+| 4 | `pipelines/export-solution-predev.yml` | `Export Solution from Pre-Dev` |
+| 5 | `pipelines/deploy-solution.yml` | `deploy-solution` |
+| 6 | `pipelines/export-to-newdev.yml` | `export-for-new-dev` |
+| 7 | `pipelines/deploy-to-newdev.yml` | `deploy-to-newdev` |
 
 > **Important:** Pipeline names matter for cross-pipeline triggers and artifact downloads:
-> - The **release pipeline** references the export pipeline as `source: "export-solutions"`. The export pipeline's name in ADO must match this value.
+> - The **release pipeline** and **release-adhoc pipeline** reference the export pipeline as `source: "export-solutions"`. The export pipeline's name in ADO must match this value.
 > - The **deploy pipeline** references the pre-dev export as `source: "Export Solution from Pre-Dev"`. Update if your pipeline name differs.
 > - The **deploy-to-newdev pipeline** references the export-for-new-dev pipeline as `source: "export-for-new-dev"`. The export pipeline's name in ADO must match this value.
 
@@ -837,6 +867,7 @@ Each pipeline must be authorized to use its variable group(s). After creating th
 | `PowerPlatform-Stage` | Release Solutions, Deploy Solution (Stage stage) |
 | `PowerPlatform-Prod` | Release Solutions, Deploy Solution (Prod stage) |
 | `PowerPlatform-NewDev` | Deploy to New Dev |
+| *(your group)* | Release Ad-Hoc (specified at runtime — no pre-authorization needed if the pipeline is set to allow all variable groups) |
 
 ### Step 8: Update Pipeline Variables
 
@@ -930,6 +961,21 @@ To validate what *would* be deployed without making any changes:
 3. Click **Run**
 
 The pipeline authenticates with each environment, validates all artifacts, queries currently installed solution versions, and logs the exact `pac solution import` command that *would* be run for each solution — but no imports are executed and no config data is upserted.
+
+### Release Ad-Hoc (Manual)
+
+To deploy any export run to an environment outside the standard QA → Stage → Prod chain:
+
+1. Go to **Pipelines** > select `release-adhoc` > **Run pipeline**
+2. Fill in the parameters:
+   - **ADO Environment name** — the environment to deploy into (e.g., `Power Platform Sandbox`)
+   - **Variable group name** — the library variable group with credentials for that environment (e.g., `PowerPlatform-Sandbox`)
+3. In the **Resources** panel, select the `export-solutions` run whose artifact you want to deploy
+4. Click **Run**
+
+The pipeline deploys all solutions from the selected export run using the same version-skip and upgrade logic as the standard release pipeline. If a `deploymentSettings_{variableGroup}.json` file is present in the artifact, it will be applied automatically.
+
+> **Note:** The variable group named in step 2 must be authorized for the `release-adhoc` pipeline. Open the variable group in **Pipelines > Library > Pipeline permissions** and add `release-adhoc` if it is not already listed.
 
 ### Export from Pre-Dev + Deploy (On-Demand)
 

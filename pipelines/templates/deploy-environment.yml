@@ -20,6 +20,9 @@ parameters:
   - name: dependsOn
     type: string
     default: ""
+  - name: settingsKey
+    type: string
+    default: ""
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -152,12 +155,12 @@ stages:
                       }
 
                       if ($includeSettings) {
-                        $settingsFile = Join-Path $artifactDir "deploymentSettings_${{ parameters.stageName }}.json"
+                        $settingsFile = Join-Path $artifactDir "deploymentSettings_${{ coalesce(parameters.settingsKey, parameters.stageName) }}.json"
                         if (-not (Test-Path $settingsFile)) {
-                          Write-Host "  MISSING: deploymentSettings_${{ parameters.stageName }}.json (required by $name)"
-                          $missingArtifacts += "deploymentSettings_${{ parameters.stageName }}.json"
+                          Write-Host "  MISSING: deploymentSettings_${{ coalesce(parameters.settingsKey, parameters.stageName) }}.json (required by $name)"
+                          $missingArtifacts += "deploymentSettings_${{ coalesce(parameters.settingsKey, parameters.stageName) }}.json"
                         } else {
-                          Write-Host "  OK:      deploymentSettings_${{ parameters.stageName }}.json"
+                          Write-Host "  OK:      deploymentSettings_${{ coalesce(parameters.settingsKey, parameters.stageName) }}.json"
                         }
                       }
                     }
@@ -312,8 +315,8 @@ stages:
                       }
 
                       if ($includeSettings) {
-                        $settingsFile = Join-Path $artifactDir "deploymentSettings_${{ parameters.stageName }}.json"
-                        Write-Host "  Using deployment settings: deploymentSettings_${{ parameters.stageName }}.json"
+                        $settingsFile = Join-Path $artifactDir "deploymentSettings_${{ coalesce(parameters.settingsKey, parameters.stageName) }}.json"
+                        Write-Host "  Using deployment settings: deploymentSettings_${{ coalesce(parameters.settingsKey, parameters.stageName) }}.json"
                         $importArgs += @("--settings-file", $settingsFile)
                       }
 
