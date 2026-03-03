@@ -35,6 +35,10 @@ resources:
 pool:
   vmImage: "windows-latest"
 
+variables:
+  - name: dryRun
+    value: "false"
+
 stages:
   - template: templates/deploy-environment.yml
     parameters:
