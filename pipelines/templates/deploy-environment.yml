@@ -23,6 +23,9 @@ parameters:
   - name: settingsKey
     type: string
     default: ""
+  - name: dryRun
+    type: boolean
+    default: false
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -96,7 +99,7 @@ stages:
                 - pwsh: |
                     $ErrorActionPreference = "Stop"
 
-                    $dryRun = "$(dryRun)" -eq "true"
+                    $dryRun = "${{ parameters.dryRun }}" -eq "True"
 
                     if ($dryRun) {
                       Write-Host ""
@@ -459,7 +462,7 @@ stages:
                 - pwsh: |
                     $ErrorActionPreference = "Stop"
 
-                    $dryRun = "$(dryRun)" -eq "true"
+                    $dryRun = "${{ parameters.dryRun }}" -eq "True"
                     if ($dryRun) {
                       Write-Host "[DRY RUN] Skipping config data upsert."
                       exit 0
