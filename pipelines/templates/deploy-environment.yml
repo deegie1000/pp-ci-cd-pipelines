@@ -123,14 +123,15 @@ stages:
                     $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
                     $solutions = $buildConfig.solutions
 
-                    if (-not $solutions -or $solutions.Count -eq 0) {
-                      Write-Error "No solutions specified in build.json"
-                      exit 1
-                    }
+                    if (-not $solutions) { $solutions = @() }
 
-                    Write-Host "Solutions to deploy ($($solutions.Count)):"
-                    foreach ($s in $solutions) {
-                      Write-Host "  - $($s.name) (v$($s.version))"
+                    if ($solutions.Count -eq 0) {
+                      Write-Host "No solutions in build.json — config data only run."
+                    } else {
+                      Write-Host "Solutions to deploy ($($solutions.Count)):"
+                      foreach ($s in $solutions) {
+                        Write-Host "  - $($s.name) (v$($s.version))"
+                      }
                     }
 
                     # -----------------------------------------------------------
