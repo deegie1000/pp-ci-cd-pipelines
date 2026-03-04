@@ -207,6 +207,7 @@ steps:
       # Pass solutions list as a JSON variable for subsequent steps
       $solutionsJson = if ($solutions.Count -gt 0) { @($solutions) | ConvertTo-Json -Compress } else { "[]" }
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
+      Write-Host "##vso[task.setvariable variable=HasSolutions]$($solutions.Count -gt 0)"
     displayName: "Read build.json configuration"
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
@@ -232,7 +233,7 @@ steps:
       Write-Host "Successfully authenticated with Power Platform"
       pac auth list
     displayName: "Authenticate with Power Platform"
-    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'), eq(variables['HasSolutions'], 'true'))
     env:
       ClientSecret: $(ClientSecret)
 
@@ -471,21 +472,6 @@ steps:
       $updatedConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $buildJsonPath -Encoding UTF8
       Write-Host "Updated build.json with detection results."
 
-      Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
-      Write-Host "Staged build.json for artifact publishing."
-
-      # -----------------------------------------------------------------
-      # Stage deployment settings files (if any solution uses them)
-      # -----------------------------------------------------------------
-      $exportFolder = Join-Path $sourceDir "exports/$(ExportSubfolder)"
-      $settingsFiles = Get-ChildItem -Path $exportFolder -Filter "deploymentSettings_*.json" -ErrorAction SilentlyContinue
-      if ($settingsFiles) {
-        foreach ($sf in $settingsFiles) {
-          Copy-Item -Path $sf.FullName -Destination "$(Build.ArtifactStagingDirectory)/$($sf.Name)"
-          Write-Host "Staged deployment settings file: $($sf.Name)"
-        }
-      }
-
       Write-Host ""
       Write-Host "============================================"
       Write-Host "  Processing Summary"
@@ -511,10 +497,41 @@ steps:
       Write-Host "##vso[task.setvariable variable=HasSolutionsToDeploy]true"
 
       # Update SolutionsList variable with cloud flow flags for downstream steps
-      $solutionsJson = if ($solutions.Count -gt 0) { @($solutions) | ConvertTo-Json -Compress } else { "[]" }
+      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
 
-      # Pass configData forward for the Extract config data step
+      Write-Host "All solutions processed successfully."
+    displayName: "Export and unpack solutions"
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'), eq(variables['HasSolutions'], 'true'))
+
+  # ===========================================================================
+  # Step 9: Stage artifacts and set config data variables
+  # ===========================================================================
+  # Always runs (when export branch found) — stages build.json and deployment
+  # settings files to the artifact, then reads configData from build.json so
+  # subsequent steps know whether to extract config data.
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $sourceDir = "$(Build.SourcesDirectory)"
+      $buildJsonPath = Join-Path $sourceDir "exports/$(ExportSubfolder)/build.json"
+
+      # Stage build.json (may have been updated by Step 8 with cloud flow flags)
+      Copy-Item -Path $buildJsonPath -Destination "$(Build.ArtifactStagingDirectory)/build.json"
+      Write-Host "Staged build.json for artifact publishing."
+
+      # Stage deployment settings files (if any)
+      $exportFolder = Join-Path $sourceDir "exports/$(ExportSubfolder)"
+      $settingsFiles = Get-ChildItem -Path $exportFolder -Filter "deploymentSettings_*.json" -ErrorAction SilentlyContinue
+      if ($settingsFiles) {
+        foreach ($sf in $settingsFiles) {
+          Copy-Item -Path $sf.FullName -Destination "$(Build.ArtifactStagingDirectory)/$($sf.Name)"
+          Write-Host "Staged deployment settings file: $($sf.Name)"
+        }
+      }
+
+      # Read build.json and set configData variables for downstream steps
+      $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
       if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData.Count -gt 0) {
         $configDataJson = @($buildConfig.configData) | ConvertTo-Json -Compress -Depth 10
         Write-Host "##vso[task.setvariable variable=ConfigDataList]$configDataJson"
@@ -524,13 +541,11 @@ steps:
         Write-Host "##vso[task.setvariable variable=HasConfigData]false"
         Write-Host "No configData defined in build.json."
       }
-
-      Write-Host "All solutions processed successfully."
-    displayName: "Export and unpack solutions"
+    displayName: "Stage artifacts and set config data variables"
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 9: Extract configuration data from Dev (if configData defined)
+  # Step 10: Extract configuration data from Dev (if configData defined)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -590,7 +605,7 @@ steps:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 10: Publish managed solutions and build.json as pipeline artifact
+  # Step 11: Publish managed solutions and build.json as pipeline artifact
   # ===========================================================================
   - task: PublishPipelineArtifact@1
     displayName: "Publish managed solution artifacts"
@@ -600,7 +615,7 @@ steps:
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 11: Merge export deployment settings into root
+  # Step 12: Merge export deployment settings into root
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -622,7 +637,7 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 12: Commit and push changes to the export branch
+  # Step 13: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -683,7 +698,7 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 13: Create a Pull Request and auto-complete (merge) into main
+  # Step 14: Create a Pull Request and auto-complete (merge) into main
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -838,7 +853,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
   # ===========================================================================
-  # Step 14: Post-export version management (bump versions in Dev)
+  # Step 15: Post-export version management (bump versions in Dev)
   # ===========================================================================
   # Runs last so a failure here does not block the PR or the commit.
   # Errors are emitted as pipeline warnings and do not fail the build.
