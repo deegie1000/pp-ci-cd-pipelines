@@ -205,7 +205,7 @@ steps:
       }
 
       # Pass solutions list as a JSON variable for subsequent steps
-      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
+      $solutionsJson = if ($solutions.Count -gt 0) { @($solutions) | ConvertTo-Json -Compress } else { "[]" }
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
     displayName: "Read build.json configuration"
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
@@ -511,7 +511,7 @@ steps:
       Write-Host "##vso[task.setvariable variable=HasSolutionsToDeploy]true"
 
       # Update SolutionsList variable with cloud flow flags for downstream steps
-      $solutionsJson = @($solutions) | ConvertTo-Json -Compress
+      $solutionsJson = if ($solutions.Count -gt 0) { @($solutions) | ConvertTo-Json -Compress } else { "[]" }
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
 
       # Pass configData forward for the Extract config data step
