@@ -44,6 +44,25 @@ pool:
 
 stages:
   # ===========================================================================
+  # SetBuildName — propagate export branch name from the triggering pipeline
+  # ===========================================================================
+  - stage: SetBuildName
+    displayName: "Set build name"
+    jobs:
+      - job: SetName
+        displayName: "Tag run with export branch"
+        pool:
+          vmImage: "windows-latest"
+        steps:
+          - pwsh: |
+              $runName = "$(resources.pipeline.ExportPipeline.runName)"
+              if ($runName) {
+                Write-Host "##vso[build.updatebuildnumber]$runName"
+                Write-Host "##vso[build.addbuildtag]$runName"
+              }
+            displayName: "Set build name from export pipeline"
+
+  # ===========================================================================
   # QA — Deploys automatically when the export pipeline completes
   # ===========================================================================
   - template: templates/deploy-environment.yml
@@ -52,6 +71,7 @@ stages:
       displayName: "Deploy to QA"
       environmentName: "Power Platform QA"
       variableGroup: "PowerPlatform-QA"
+      dependsOn: SetBuildName
       dryRun: ${{ parameters.dryRun }}
 
   # ===========================================================================
