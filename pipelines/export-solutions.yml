@@ -144,7 +144,7 @@ steps:
       Write-Host "##vso[task.setvariable variable=ExportBranch]$exportBranch"
       Write-Host "##vso[task.setvariable variable=ExportSubfolder]$subfolder"
       Write-Host "##vso[task.setvariable variable=ExportBranchFound]true"
-      Write-Host "##vso[build.updatebuildnumber]$exportBranch"
+      Write-Host "##vso[build.updatebuildnumber]$subfolder"
       Write-Host "##vso[build.addbuildtag]$exportBranch"
     displayName: "Detect export branch"
 
