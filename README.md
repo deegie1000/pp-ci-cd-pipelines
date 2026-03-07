@@ -896,7 +896,7 @@ The pipeline's build service identity needs permissions to push commits and crea
 
 The pipeline runs automatically every day at **10:00 PM ET**, but can also be triggered manually on demand from the ADO UI. The pipeline will:
 - Check if an export branch exists for today's date
-- Skip gracefully (with a warning) if no matching branch is found
+- Mark the pipeline as **Cancelled** (not failed) if no matching branch is found — this prevents the release pipeline from triggering on nights with no export
 - Process all solutions and merge if a branch is found
 
 **To set up an export run**, create a branch and `build.json`:
@@ -1050,7 +1050,7 @@ Common examples:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Pipeline skips with "No export branch found" | No branch matching `export/{today}-*` exists | Create the export branch and push it before the scheduled run |
+| Pipeline shows as **Cancelled** with "No export branch found" | No branch matching `export/{today}-*` exists | This is expected on nights with no planned release — create the export branch and push it before the scheduled run when a release is needed. The release pipeline will not trigger on cancelled runs. |
 | "build.json not found" | The `exports/{subfolder}/build.json` file is missing on the export branch | Ensure the file path matches the branch name (minus the `export/` prefix) |
 | "Version mismatch for '...'" | The solution version in Dev doesn't match the version in `build.json` | Update `build.json` to match the current version in Dev, or update the version in Dev to match `build.json` |
 | "Failed to authenticate with Power Platform" | Secret variables are missing or incorrect | Verify `ClientId`, `ClientSecret`, and `TenantId` in pipeline variables |
@@ -1081,7 +1081,7 @@ Common examples:
 |---|---|---|
 | Release pipeline doesn't trigger | Export pipeline name mismatch | Ensure the export pipeline is named `export-solutions` in ADO (must match `source` in `release-solutions.yml`) |
 | Release pipeline doesn't trigger | Export didn't run on `main` | The release only triggers when the export pipeline runs against the `main` branch |
-| "build.json not found in artifact" | Export pipeline didn't publish artifacts | Check the export pipeline logs &mdash; it may have skipped (no export branch found) or failed before artifact publishing |
+| "build.json not found in artifact" | Export pipeline didn't publish artifacts | Check the export pipeline logs &mdash; it may have been cancelled (no export branch found, which should not trigger the release) or failed before artifact publishing |
 | "Failed to authenticate" in a stage | Variable group misconfigured | Verify the variable group for that stage has correct `EnvironmentUrl`, `ClientId`, `ClientSecret`, and `TenantId` |
 | "Failed to list solutions" | SPN lacks read access to target environment | Ensure the app user has System Administrator or System Customizer role in the target environment |
 | "Failed to import solution" | Missing dependencies, invalid solution, or insufficient permissions | Check the pipeline logs for the detailed Dataverse error. Common causes: a dependent solution is missing, version downgrade attempted, or SPN lacks import permissions |

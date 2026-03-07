@@ -112,9 +112,8 @@ steps:
         $refs = git ls-remote --heads origin "refs/heads/export/$targetDate-*" 2>&1
 
         if ($LASTEXITCODE -ne 0 -or -not $refs) {
-          Write-Host "##vso[task.logissue type=warning]No export branch found for date $targetDate"
-          Write-Host "##vso[task.setvariable variable=ExportBranchFound]false"
-          Write-Host "No matching export branch found. Pipeline will skip remaining steps."
+          Write-Host "No export branch found for date $targetDate — cancelling pipeline."
+          Write-Host "##vso[task.complete result=Cancelled;]No export branch found for $targetDate"
           exit 0
         }
 

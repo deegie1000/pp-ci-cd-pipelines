@@ -128,7 +128,7 @@ The pipeline will export from Pre-Dev and automatically deploy to Dev. To then p
 - Check your ADO notification settings
 
 **The daily export didn't run**
-- The export looks for a branch named `export/{today's date}-{something}` in the repo — if no such branch exists, it skips. Ask your developer to create the export branch for that date.
+- The export looks for a branch named `export/{today's date}-{something}` in the repo — if no such branch exists, the pipeline marks itself as **Cancelled** (this is expected on nights with no planned release, and the release pipeline will not trigger). Ask your developer to create the export branch for that date when a release is needed.
 
 ---
 
