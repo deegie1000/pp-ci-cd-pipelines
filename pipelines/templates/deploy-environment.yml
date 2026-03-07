@@ -265,6 +265,15 @@ stages:
                         Write-Host "  isRollback = true — staged upgrade will NOT be used; importing without version guard to allow lower version."
                       }
 
+                      # Read isUnmanaged flag from build.json solution entry
+                      $isUnmanaged = $false
+                      if ($solution.PSObject.Properties['isUnmanaged']) {
+                        $isUnmanaged = [bool]$solution.isUnmanaged
+                      }
+                      if ($isUnmanaged) {
+                        Write-Host "  isUnmanaged = true — importing as unmanaged; staged upgrade will NOT be used."
+                      }
+
                       # Check if already installed at this version
                       $isUpgrade = $false
                       if ($installed.ContainsKey($name)) {
@@ -296,11 +305,15 @@ stages:
                         Write-Host "  Not currently installed — fresh install"
                       }
 
-                      # Import managed solution
-                      Write-Host "  Importing managed solution..."
+                      # Import solution (managed or unmanaged based on isUnmanaged flag)
+                      if ($isUnmanaged) {
+                        Write-Host "  Importing unmanaged solution (isUnmanaged=true)..."
+                      } else {
+                        Write-Host "  Importing managed solution..."
+                      }
 
-                      # Use --stage-and-upgrade only when upgrading; fresh installs don't have
-                      # a base solution to hold against and will fail with ImportAsHolding.
+                      # Use --stage-and-upgrade only for managed upgrades.
+                      # Unmanaged imports and rollbacks skip staged upgrade entirely.
                       $importArgs = @(
                         "solution", "import",
                         "--path", $zipPath,
@@ -308,7 +321,7 @@ stages:
                         "--async",
                         "--max-async-wait-time", "60"
                       )
-                      if ($isUpgrade -and -not $isRollback) {
+                      if ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
                       }
@@ -453,7 +466,7 @@ stages:
                     }
 
                     Write-Host "`nAll solutions deployed successfully to ${{ parameters.stageName }}."
-                  displayName: "Deploy solutions"
+                  displayName: "Deploy solutions (managed and unmanaged)"
                   env:
                     ClientSecret: $(ClientSecret)
 

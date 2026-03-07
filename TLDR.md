@@ -16,8 +16,8 @@ They move Power Platform solutions (apps, flows, etc.) from development environm
 |---|---|---|
 | **Daily Export** | Automatically every night ~10 PM | Saves the latest Dev work to source control and kicks off the QA deployment |
 | **Release** | Automatically after Daily Export | Deploys to QA (automatic), then waits for approval to go to Stage and Prod |
-| **Export from Pre-Dev** | You run it manually | Pulls a single solution out of Pre-Dev and starts deploying it through all environments |
-| **Deploy Solution** | Automatically after Pre-Dev Export | Deploys that single solution through Dev → QA → Stage → Prod (with approvals) |
+| **Export from Pre-Dev** | You run it manually | Pulls a single solution out of Pre-Dev and deploys it to Dev |
+| **Deploy Solution** | Automatically after Pre-Dev Export | Deploys that single solution into Dev |
 | **Export for New Dev** | You run it manually | Packages solutions from Dev to seed a brand-new Dev environment |
 | **Deploy to New Dev** | You run it manually | Takes that package and installs it into the new Dev environment |
 
@@ -96,18 +96,20 @@ Use this when someone needs a fresh Power Platform environment that mirrors Dev 
 
 The solutions will be installed into the New Dev environment. Solutions marked as "unmanaged" in the configuration will be installed as unmanaged (editable), which is typical for a Dev environment.
 
+> **Note:** The `isUnmanaged` flag in `build.json` also controls how solutions are deployed through the standard release pipeline (QA → Stage → Prod). If a solution has `isUnmanaged: true`, the release pipeline will import it as an unmanaged solution instead of managed. This also works together with `isExisting: true` — if both are set, the pipeline reads the zip from `solutions/unmanaged/` instead of `solutions/managed/`.
+
 ---
 
-## Single solution quick-deploy (Pre-Dev → everywhere)
+## Single solution quick-deploy (Pre-Dev → Dev)
 
-When a developer finishes work on a single solution in Pre-Dev and needs it deployed everywhere:
+When a developer finishes work on a single solution in Pre-Dev and needs it deployed to Dev:
 
 1. Go to **Pipelines** → **Export Solution from Pre-Dev**
 2. Click **Run pipeline**
 3. Enter the **solution name** (the unique technical name, e.g. `MyApp`)
 4. Click **Run**
 
-The pipeline will export from Pre-Dev and automatically start deploying to Dev, then wait for your approval at QA, Stage, and Prod (same approval process as above).
+The pipeline will export from Pre-Dev and automatically deploy to Dev. To then promote to QA, Stage, or Prod, use the **Release Ad-Hoc** pipeline.
 
 ---
 

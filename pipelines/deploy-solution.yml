@@ -1,37 +1,28 @@
 # =============================================================================
-# Pipeline: Deploy Solution (Dev → QA → Stage → Prod)
+# Pipeline: Deploy Solution (Dev)
 # =============================================================================
 # Automatically triggered when the "Export Solution from Pre-Dev" pipeline
 # completes successfully. Can also be run manually.
 #
-# Multi-stage pipeline that deploys a single managed solution through all
-# environments in sequence. Dev deploys automatically; QA, Stage, and Prod
-# require manual approval — configure approval checks on the corresponding
-# ADO environments:
-#   - "Power Platform QA"    → add approval gate
-#   - "Power Platform Stage" → add approval gate
-#   - "Power Platform Prod"  → add approval gate
+# Deploys a single managed solution into Dev. For promotion to QA, Stage, and
+# Prod, use the release-adhoc pipeline against the export-solutions artifact.
 #
 # Auto-triggered: Downloads the managed solution artifact published by the
-#                 export pipeline and imports it through all stages.
+#                 export pipeline and imports it into Dev.
 #
 # Manual run:     Requires the solutionName parameter. Imports
-#                 solutions/managed/{solutionName}.zip through all stages.
+#                 solutions/managed/{solutionName}.zip into Dev.
 #
 # Prerequisites:
-#   1. ADO Environments created:
+#   1. ADO Environment created:
 #      - "Power Platform Dev"     (no approval check)
-#      - "Power Platform QA"      (with approval check)
-#      - "Power Platform Stage"   (with approval check)
-#      - "Power Platform Prod"    (with approval check)
-#   3. Variable groups per environment containing:
+#   2. Variable group containing:
 #      - EnvironmentUrl  : Dataverse environment URL
 #      - ClientId        : Service Principal Application (Client) ID
 #      - ClientSecret    : Service Principal Client Secret (mark as secret)
 #      - TenantId        : Azure AD Tenant ID
-#      Groups: PowerPlatform-Dev, PowerPlatform-QA, PowerPlatform-Stage,
-#              PowerPlatform-Prod
-#   4. The export-solution-predev pipeline publishes an artifact named
+#      Group: PowerPlatform-Dev
+#   3. The export-solution-predev pipeline publishes an artifact named
 #      "ManagedSolution" containing the managed solution zip
 # =============================================================================
 
@@ -460,81 +451,3 @@ stages:
                   env:
                     ClientSecret: $(ClientSecret)
 
-                # ===============================================================
-                # Stage solution artifact for downstream stages
-                # ===============================================================
-                - pwsh: |
-                    $ErrorActionPreference = "Stop"
-
-                    $stagingDir = "$(Build.ArtifactStagingDirectory)/DeploySolution"
-                    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
-
-                    Copy-Item -Path "$(SolutionZipPath)" -Destination $stagingDir
-                    Write-Host "Staged solution for downstream stages: $(SolutionZipPath)"
-
-                    # Also stage build.json and config data files if available (for downstream config data upsert)
-                    $artifactDir = "$(Pipeline.Workspace)/exportSolution/ManagedSolution"
-                    if (Test-Path $artifactDir) {
-                      $buildJsonSrc = Join-Path $artifactDir "build.json"
-                      if (Test-Path $buildJsonSrc) {
-                        Copy-Item -Path $buildJsonSrc -Destination "$stagingDir/build.json"
-                        Write-Host "Staged build.json for downstream stages"
-
-                        # Stage config data files
-                        $buildConfig = Get-Content $buildJsonSrc -Raw | ConvertFrom-Json
-                        if ($buildConfig.PSObject.Properties["configData"]) {
-                          foreach ($ds in $buildConfig.configData) {
-                            $dataFileSrc = Join-Path $artifactDir $ds.dataFile
-                            if (Test-Path $dataFileSrc) {
-                              $destDir = Join-Path $stagingDir (Split-Path $ds.dataFile -Parent)
-                              New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-                              Copy-Item -Path $dataFileSrc -Destination (Join-Path $stagingDir $ds.dataFile)
-                              Write-Host "Staged config data: $($ds.dataFile)"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  displayName: "Stage solution for downstream stages"
-
-                - task: PublishPipelineArtifact@1
-                  displayName: "Publish solution for downstream stages"
-                  inputs:
-                    targetPath: $(Build.ArtifactStagingDirectory)/DeploySolution
-                    artifact: DeploySolution
-
-  # ===========================================================================
-  # QA — Requires manual approval (configure on the ADO environment)
-  # ===========================================================================
-  - template: templates/deploy-single-solution.yml
-    parameters:
-      stageName: QA
-      displayName: "Deploy to QA"
-      environmentName: "Power Platform QA with Approval"
-      variableGroup: "PowerPlatform-QA"
-      dependsOn: Dev
-      dryRun: ${{ parameters.dryRun }}
-
-  # ===========================================================================
-  # Stage — Requires manual approval (configure on the ADO environment)
-  # ===========================================================================
-  - template: templates/deploy-single-solution.yml
-    parameters:
-      stageName: Stage
-      displayName: "Deploy to Stage"
-      environmentName: "Power Platform Stage"
-      variableGroup: "PowerPlatform-Stage"
-      dependsOn: QA
-      dryRun: ${{ parameters.dryRun }}
-
-  # ===========================================================================
-  # Prod — Requires manual approval (configure on the ADO environment)
-  # ===========================================================================
-  - template: templates/deploy-single-solution.yml
-    parameters:
-      stageName: Prod
-      displayName: "Deploy to Prod"
-      environmentName: "Power Platform Prod"
-      variableGroup: "PowerPlatform-Prod"
-      dependsOn: Stage
-      dryRun: ${{ parameters.dryRun }}

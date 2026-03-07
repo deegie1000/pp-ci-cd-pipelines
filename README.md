@@ -13,12 +13,12 @@ Azure DevOps pipelines for exporting, versioning, and deploying Power Platform s
   - [2. Release Solutions](#2-release-solutions-pipelinesrelease-solutionsyml)
   - [3. Release Ad-Hoc](#3-release-ad-hoc-pipelinesrelease-adhocyml)
   - [4. Export Solution from Pre-Dev](#4-export-solution-from-pre-dev-pipelinesexport-solution-predevyml)
-  - [5. Deploy Solution](#5-deploy-solution-pipelinesdeploy-solutionyml)
+  - [5. Deploy Solution (Dev)](#5-deploy-solution-pipelinesdeploy-solutionyml)
   - [6. Export for New Dev](#6-export-for-new-dev-pipelinesexport-to-newdevyml)
   - [7. Deploy to New Dev](#7-deploy-to-new-dev-pipelinesdeploy-to-newdevyml)
 - [Pipeline Flow](#pipeline-flow)
   - [Daily Export + Release](#daily-export--release-dev--qa--stage--prod)
-  - [Pre-Dev Promotion](#pre-dev-promotion-on-demand-dev--qa--stage--prod)
+  - [Pre-Dev Promotion](#pre-dev-promotion-on-demand)
   - [Architecture Overview](#architecture-overview)
 - [build.json Configuration](#buildjson-configuration)
   - [Solutions Fields](#solutions-fields)
@@ -59,18 +59,14 @@ pp-ci-cd-pipelines/
 │   ├── release-solutions.yml            # Release pipeline (QA → Stage → Prod)
 │   ├── release-adhoc.yml                # Ad-hoc release to any environment
 │   ├── export-solution-predev.yml       # On-demand single solution export (Pre-Dev)
-│   ├── deploy-solution.yml              # Multi-stage deploy (Dev → QA → Stage → Prod)
+│   ├── deploy-solution.yml              # Deploy single solution to Dev (triggered by pre-dev export)
 │   ├── export-to-newdev.yml             # Manual export from Dev to seed a New Dev environment
 │   ├── deploy-to-newdev.yml             # Manual deploy to a New Dev environment
 │   └── templates/
-│       ├── deploy-environment.yml        # Reusable deploy template (used by release pipeline)
-│       └── deploy-single-solution.yml    # Reusable deploy template (used by deploy pipeline)
+│       └── deploy-environment.yml        # Reusable deploy template (used by release pipelines)
 ├── deploymentSettings/
 │   ├── preDev/                              # Deployment settings for Pre-Dev exports
 │   │   ├── deploymentSettings_Dev.json      #   Applied when deploying to Dev
-│   │   ├── deploymentSettings_QA.json       #   Applied when deploying to QA
-│   │   ├── deploymentSettings_Stage.json    #   Applied when deploying to Stage
-│   │   ├── deploymentSettings_Prod.json     #   Applied when deploying to Prod
 │   │   └── deploymentSettings_PreDev.json   #   Settings for the Pre-Dev environment itself
 │   ├── deploymentSettings_Dev.json          # Accumulated deployment settings for Dev (daily export)
 │   ├── deploymentSettings_QA.json           # Accumulated deployment settings for QA (daily export)
@@ -111,7 +107,7 @@ pp-ci-cd-pipelines/
 | 2 | [Release Solutions](#2-release-solutions) | Auto (on export completion) | Deploy managed solutions through QA → Stage → Prod |
 | 3 | [Release Ad-Hoc](#3-release-ad-hoc) | Manual | Deploy any export run to a named environment and variable group |
 | 4 | [Export from Pre-Dev](#4-export-solution-from-pre-dev) | Manual | Export single solution from Pre-Dev, commit, trigger Dev deploy |
-| 5 | [Deploy Solution](#5-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution through Dev &rarr; QA &rarr; Stage &rarr; Prod |
+| 5 | [Deploy Solution (Dev)](#5-deploy-solution) | Auto (on Pre-Dev export) | Deploy managed solution into Dev |
 | 6 | [Export for New Dev](#6-export-for-new-dev) | Manual | Export solutions from Dev to seed a new Dev environment (supports `isUnmanaged`) |
 | 7 | [Deploy to New Dev](#7-deploy-to-new-dev) | Manual | Deploy the New Dev artifact into a fresh New Dev environment |
 
@@ -128,7 +124,7 @@ Exports solutions from the Power Platform **Dev** environment on a daily schedul
 1. Detects a Git branch matching `export/{today's date}-{token}` (e.g., `export/2026-02-15-sprint42`)
 2. Reads `exports/{date-token}/build.json` on that branch for the list of solutions and their expected versions
 3. For each solution:
-   - If `isExisting: true`, uses the managed zip already in `solutions/managed/{name}_{version}.zip` and skips all export/unpack steps. Fails if the zip is not found.
+   - If `isExisting: true`, skips all export/unpack steps and uses a pre-existing zip already in the repo. If `isUnmanaged: true`, reads from `solutions/unmanaged/{name}_{version}.zip`; otherwise reads from `solutions/managed/{name}_{version}.zip`. Fails if the expected zip is not found.
    - Checks if a managed zip already exists for this name + version (cache check &mdash; skips if so)
    - Exports the **unmanaged** solution zip from Power Platform &rarr; `solutions/unmanaged/`
    - Performs a **clean unpack** (deletes existing folder, then unpacks fresh) &rarr; `solutions/unpacked/`
@@ -178,7 +174,8 @@ Deploys managed solutions through three environments in sequence: **QA &rarr; St
 5. For each solution in `build.json` (in order):
    - **Skip** &mdash; if the solution is already installed at the target version
    - **Fresh install** &mdash; if the solution doesn't exist in the target environment: imports with `--activate-plugins`
-   - **Upgrade** &mdash; if the solution exists but at a different version: imports with `--stage-and-upgrade --skip-lower-version --activate-plugins`
+   - **Upgrade (managed)** &mdash; if the solution exists at a different version and `isUnmanaged` is not set: imports with `--stage-and-upgrade --skip-lower-version --activate-plugins`
+   - **Unmanaged import** &mdash; if `isUnmanaged: true`: imports directly without `--stage-and-upgrade`, regardless of whether the solution is already installed. Use this when the artifact zip is an unmanaged solution.
    - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
    - If the solution has `includesCloudFlows: true`, checks for inactive cloud flows after import and attempts to activate them. Activation failures are logged as **warnings** but do not fail the deployment
 6. **Upserts configuration data** &mdash; if `configData` is defined in `build.json`, PATCHes each record into the target environment using stable GUIDs. Record-level failures are logged as **warnings** but do not fail the deployment. See [Configuration Data](#configuration-data)
@@ -245,37 +242,26 @@ On-demand pipeline that exports a **single solution** from the **Pre-Dev** envir
 4. Exports the **managed** solution directly from Pre-Dev using `pac solution export --managed` &rarr; `solutions/managed/{name}_{version}.zip`
 5. Creates a timestamped branch `export/predev/{yyyy-MM-dd-HHmmss}`, commits the solution files, and pushes to that branch
 6. Creates a Pull Request from the export branch to `main`, sets auto-complete (squash merge), and deletes the source branch
-7. Publishes the managed zip and **all** `deploymentSettings_*.json` files from `deploymentSettings/preDev/` as a pipeline artifact
-8. **Automatically triggers** the Deploy Solution pipeline (Dev &rarr; QA &rarr; Stage &rarr; Prod)
+7. Publishes the managed zip and `deploymentSettings_Dev.json` from `deploymentSettings/preDev/` as a pipeline artifact
+8. **Automatically triggers** the Deploy Solution pipeline (Dev only)
 
 **Trigger:** Manual only (run on demand from the ADO UI).
 
-**Auth:** Uses pac CLI with credentials from the `PowerPlatform-PreDev` variable group.
+**Auth:** Uses pac CLI with credentials from the `PowerPlatform-PreDev` variable group. Does not require Power Platform Build Tools — all operations use pac CLI directly.
 
 ---
 
 ### 5. Deploy Solution (`pipelines/deploy-solution.yml`)
 
-Multi-stage pipeline that deploys a single managed solution through all environments in sequence: **Dev &rarr; QA &rarr; Stage &rarr; Prod**. Runs automatically after the Pre-Dev export pipeline completes, or can be triggered manually.
+Deploys a single managed solution into the **Dev** environment. Runs automatically after the Pre-Dev export pipeline completes, or can be triggered manually. For promotion to QA, Stage, and Prod, use the [Release Ad-Hoc](#3-release-ad-hoc-pipelinesrelease-adhocyml) pipeline against an `export-solutions` artifact.
 
-**What it does (per stage):**
+**What it does:**
 
-1. Downloads the managed solution artifact (Dev downloads from the export pipeline; QA/Stage/Prod download from the Dev stage's published artifact)
-2. Authenticates with the target environment using credentials from a per-environment variable group
-3. Checks for `deploymentSettings_{stage}.json` &mdash; in the artifact (Dev, auto-triggered) or in `deploymentSettings/preDev/` folder (Dev manual, and all downstream stages)
-4. Imports the managed solution, applying deployment settings if found. If `build.json` is present in the artifact and the solution has `isRollback: true`, `--skip-lower-version` is omitted so a lower version can overwrite a higher one
-5. **Upserts configuration data** &mdash; if `build.json` is present in the artifact and contains `configData`, PATCHes each record into the target environment. See [Configuration Data](#configuration-data)
-
-**Stages:**
-
-| Stage | Deploys To | Trigger | Approval Required |
-|---|---|---|---|
-| **Dev** | Dev environment | Automatic (on Pre-Dev export completion) | No |
-| **QA** | QA environment | After Dev succeeds | **Yes** &mdash; manual approval |
-| **Stage** | Stage environment | After QA succeeds | **Yes** &mdash; manual approval |
-| **Prod** | Prod environment | After Stage succeeds | **Yes** &mdash; manual approval |
-
-QA, Stage, and Prod approvals are controlled by **ADO Environment approval checks**. See [Step 5: Create ADO Environments](#step-5-create-ado-environments-release-pipeline) for setup.
+1. Downloads the managed solution artifact from the Pre-Dev export pipeline (auto-triggered) or uses `solutions/managed/{name}.zip` from the repo (manual)
+2. Authenticates with Dev using credentials from the `PowerPlatform-Dev` variable group
+3. Checks for `deploymentSettings_Dev.json` &mdash; in the artifact (auto-triggered) or in `deploymentSettings/preDev/` (manual)
+4. Imports the managed solution into Dev, applying deployment settings if found. If `build.json` is present in the artifact and the solution has `isRollback: true`, `--skip-lower-version` is omitted so a lower version can overwrite a higher one
+5. **Upserts configuration data** &mdash; if `build.json` is present in the artifact and contains `configData`, PATCHes each record into Dev. See [Configuration Data](#configuration-data)
 
 **Trigger:** Automatic (on completion of the Pre-Dev export pipeline) or manual with a `solutionName` parameter.
 
@@ -284,11 +270,9 @@ QA, Stage, and Prod approvals are controlled by **ADO Environment approval check
 | Parameter | Default | Description |
 |---|---|---|
 | `solutionName` | `""` | The solution's unique name as it appears in Power Platform. Required for manual runs; ignored for auto-triggered runs. |
-| `dryRun` | `false` | When `true`, authenticates, queries installed solution versions, and logs exactly what *would* be imported at each stage — but performs no imports and no config data upserts. |
+| `dryRun` | `false` | When `true`, authenticates, queries the installed solution version, and logs exactly what *would* be imported — but performs no imports and no config data upserts. |
 
-**Auth:** Uses pac CLI with credentials from variable groups (`PowerPlatform-Dev`, `PowerPlatform-QA`, `PowerPlatform-Stage`, `PowerPlatform-Prod`).
-
-**Template:** Uses `pipelines/templates/deploy-single-solution.yml` for QA, Stage, and Prod stages to keep the logic DRY.
+**Auth:** Uses pac CLI with credentials from the `PowerPlatform-Dev` variable group.
 
 ---
 
@@ -369,29 +353,32 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
 │  9. PR to main           │                                                │
 │                          │    │  - Checks installed versions                │
 └──────────────────────────┘    │  - Skips if already at target version       │
-                                │  - Imports managed: stage-and-upgrade      │
+                                │  - Managed upgrade: stage-and-upgrade      │
+                                │  - Unmanaged (isUnmanaged=true): direct     │
                                 │  - Applies deployment settings if enabled   │
                                 │  - Activates cloud flows (warn on failure)  │
                                 └─────────────────────────────────────────────┘
 ```
 
-### Pre-Dev Promotion (On-Demand: Dev &rarr; QA &rarr; Stage &rarr; Prod)
+### Pre-Dev Promotion (On-Demand)
 
 ```
-┌─────────────────────────────────┐       ┌──────────────────────────────────────────────────┐
-│  Export Solution from Pre-Dev   │       │  Deploy Solution                                 │
-│  (manual trigger)               │       │  (auto-triggered on export completion)            │
-│                                 │       │                                                   │
-│  1. Export unmanaged from       │       │  ┌───────┐     ┌───────┐     ┌───────┐  ┌──────┐│
-│     Pre-Dev environment         │  ───► │  │  Dev  │────►│  QA   │────►│ Stage │─►│ Prod ││
-│  2. Clean unpack (pac CLI)      │       │  │ (auto)│     │(appv.)│     │(appv.)│  │(appv)││
-│  3. Export managed directly     │       │  └───────┘     └───────┘     └───────┘  └──────┘│
-│  4. Create export/predev/       │       │                                                   │
-│     {timestamp} branch + commit │       │  Each stage:                                      │
-│  5. PR to main → squash merge   │       │  - Imports managed solution                        │
-│  6. Publish artifact + all      │       │  - Applies preDev/{stage}.json settings            │
-│     preDev settings files       │       │                                                   │
-└─────────────────────────────────┘       └──────────────────────────────────────────────────┘
+┌─────────────────────────────────┐       ┌──────────────────────────────────┐
+│  Export Solution from Pre-Dev   │       │  Deploy Solution                 │
+│  (manual trigger)               │       │  (auto-triggered on export)      │
+│                                 │       │                                  │
+│  1. Export unmanaged from       │       │  ┌───────┐                       │
+│     Pre-Dev environment         │  ───► │  │  Dev  │                       │
+│  2. Clean unpack (pac CLI)      │       │  │ (auto)│                       │
+│  3. Export managed directly     │       │  └───────┘                       │
+│  4. Create export/predev/       │       │                                  │
+│     {timestamp} branch + commit │       │  - Imports managed solution       │
+│  5. PR to main → squash merge   │       │  - Applies deploymentSettings_   │
+│  6. Publish artifact +          │       │    Dev.json if present           │
+│     deploymentSettings_Dev.json │       │                                  │
+└─────────────────────────────────┘       └──────────────────────────────────┘
+
+To promote to QA/Stage/Prod, use the Release Ad-Hoc pipeline with an export-solutions artifact.
 ```
 
 ### Architecture Overview
@@ -410,15 +397,17 @@ This is the primary CI/CD flow. Solutions are exported from Dev nightly, and the
                  ▼                                            ▼
   ┌─────────────────────────────┐              ┌─────────────────────────────┐
   │  4. Deploy Solution         │              │  2. Release Solutions       │
-  │     Dev → QA → Stg → Prod  │              │     QA → Stage → Prod      │
+  │     Dev only                │              │     QA → Stage → Prod      │
   │     (single solution)       │              │     (multi-solution)        │
   └─────────────────────────────┘              └─────────────────────────────┘
-
-  Approval gates:                              Approval gates:
-  ┌─────┐  ┌─────┐  ┌─────┐  ┌──────┐        ┌─────┐  ┌─────┐  ┌──────┐
-  │ Dev │─►│ QA  │─►│ Stg │─►│ Prod │        │ QA  │─►│ Stg │─►│ Prod │
-  │auto │  │gate │  │gate │  │gate  │        │auto │  │gate │  │gate  │
-  └─────┘  └─────┘  └─────┘  └──────┘        └─────┘  └─────┘  └──────┘
+                 │
+                 │ for QA/Stage/Prod, run:
+                 ▼
+  ┌─────────────────────────────┐              Approval gates:
+  │  3. Release Ad-Hoc          │              ┌─────┐  ┌─────┐  ┌──────┐
+  │     (manual, any env)       │              │ QA  │─►│ Stg │─►│ Prod │
+  └─────────────────────────────┘              │auto │  │gate │  │gate  │
+                                               └─────┘  └─────┘  └──────┘
 ```
 
 ---
@@ -458,9 +447,9 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions[].postExportVersion` | Optional string. If set, the export pipeline bumps this solution's version in Dev to the specified version after export. See [Post-Export Version Management](#post-export-version-management). |
 | `solutions[].createNewPatch` | Optional boolean (default: `false`). Only used when `postExportVersion` is set. If `true`, a new patch is cloned from this solution at `postExportVersion` via the Dataverse [`CloneAsPatch`](https://learn.microsoft.com/en-us/power-apps/developer/data-platform/webapi/reference/cloneaspatch) action. If `false`, the solution's version is updated directly via [`pac solution online-version`](https://learn.microsoft.com/en-us/power-platform/developer/cli/reference/solution). |
 | `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
-| `solutions[].isExisting` | Optional boolean (default: `false`). If `true`, the export pipeline skips exporting this solution from Power Platform and uses the managed zip already present in `solutions/managed/{name}_{version}.zip`. Use this when the zip is already committed to the repo and no re-export is needed. The pipeline fails if the zip is not found. |
+| `solutions[].isExisting` | Optional boolean (default: `false`). If `true`, the export pipeline skips exporting this solution from Power Platform and uses a pre-existing zip already committed to the repo. The source directory depends on `isUnmanaged`: if `isUnmanaged: true`, the zip is read from `solutions/unmanaged/{name}_{version}.zip`; otherwise it is read from `solutions/managed/{name}_{version}.zip`. The pipeline fails if the expected zip is not found. |
 | `solutions[].isRollback` | Optional boolean (default: `false`). If `true`, the deploy pipelines omit `--skip-lower-version` when importing this solution, allowing a lower (rollback) version to be installed over a higher one. Applies to all stages (Dev, QA, Stage, Prod). |
-| `solutions[].isUnmanaged` | Optional boolean (default: `false`). **Used only by the New Dev pipelines.** If `true`, `export-for-new-dev` stages the unmanaged zip in the artifact instead of the managed zip, and `deploy-to-newdev` imports it as unmanaged (direct import, no staged upgrade). Ignored by all other pipelines. |
+| `solutions[].isUnmanaged` | Optional boolean (default: `false`). When `true`: (1) **`isExisting` source** — the export pipeline reads the pre-existing zip from `solutions/unmanaged/` instead of `solutions/managed/`. (2) **Daily export release** — the release pipeline (`deploy-environment.yml`) imports the solution as unmanaged (direct import, no staged upgrade). (3) **New Dev pipelines** — `export-for-new-dev` stages the unmanaged zip in the artifact and `deploy-to-newdev` imports it as unmanaged. |
 
 ### Config Data Fields
 
@@ -675,7 +664,7 @@ Config data upsert runs **after** solution imports because the target tables mus
 - The `select` columns should not include the primary key &mdash; it is added automatically during extraction
 - Data files are committed to the export branch (inside the export folder) and included in the PR to `main`
 - Config data is included in the `ManagedSolutions` artifact alongside solution zips and deployment settings
-- The deploy-solution pipeline (pipeline 4) passes config data through the `DeploySolution` artifact chain from Dev to downstream stages
+- The deploy-solution pipeline (pipeline 5) upserts config data into Dev if `build.json` contains a `configData` array in the artifact
 
 ---
 
@@ -700,7 +689,7 @@ Invoke-Pester tests/ -Output Detailed
 | `Merge-DeploymentSettings.Tests.ps1` | Merge logic: new items appended, existing items overwritten by export, multiple environment files processed independently, empty arrays preserved |
 | `Build-Json-Validation.Tests.ps1` | `build.json` validation: required fields, `includeDeploymentSettings` defaults to false, only one solution may have it set to true |
 | `Cloud-Flow-Detection.Tests.ps1` | Cloud flow detection: `.json` files in `Workflows/` detected, `.xaml`-only and empty directories return false, `includesCloudFlows` flag round-trip through `build.json` serialization |
-| `Deploy-Dev-Settings.Tests.ps1` | Pre-Dev &rarr; Dev deployment settings: artifact staging includes settings file when present, deploy resolves settings from artifact (auto-triggered) or repo root (manual) |
+| `Deploy-Dev-Settings.Tests.ps1` | Pre-Dev &rarr; Dev deployment settings: settings file resolution from artifact (auto-triggered) or `deploymentSettings/preDev/` (manual) |
 | `Config-Data-Validation.Tests.ps1` | Config data validation: required fields (`name`, `entity`, `primaryKey`, `select`, `dataFile`), optional `filter`, multiple data sets, empty/missing `configData` array, data file round-trip serialization |
 
 ---
@@ -739,7 +728,7 @@ Invoke-Pester tests/ -Output Detailed
 
 ### Step 3: Create Power Platform Service Connections
 
-> **No service connections are required.** All four pipelines authenticate via pac CLI using credentials from variable groups (created in Step 4). The `PowerPlatformToolInstaller@2` task is used only to install the Power Platform Build Tools extension on the agent &mdash; it does not require a service connection.
+> **No service connections are required.** All pipelines authenticate via pac CLI using credentials from variable groups (created in Step 4). The `PowerPlatformToolInstaller@2` task is used only where Power Platform Build Tools ADO tasks are needed (daily export and new dev pipelines) &mdash; it does not require a service connection.
 >
 > You can skip this step entirely.
 
@@ -808,12 +797,12 @@ Both the release pipeline and the deploy pipeline use **[ADO Environments](https
 | Environment Name | Used By | Approval Check |
 |---|---|---|
 | `Power Platform Dev` | Deploy pipeline only | None (deploys automatically) |
-| `Power Platform QA` | Release pipeline + Deploy pipeline | **Deploy pipeline:** add approval check. **Release pipeline:** deploys automatically (see note) |
-| `Power Platform Stage` | Release pipeline + Deploy pipeline | **Add approval check** &mdash; select approver(s) |
-| `Power Platform Prod` | Release pipeline + Deploy pipeline | **Add approval check** &mdash; select approver(s) |
+| `Power Platform QA` | Release pipeline | Deploys automatically (see note) |
+| `Power Platform Stage` | Release pipeline | **Add approval check** &mdash; select approver(s) |
+| `Power Platform Prod` | Release pipeline | **Add approval check** &mdash; select approver(s) |
 | `Power Platform NewDev` | Deploy to New Dev pipeline | None (or add an approval check if desired) |
 
-> **Note:** ADO environment approval checks apply to **all** pipelines that use the environment. If you add an approval gate to `Power Platform QA`, both the release pipeline and the deploy pipeline will require approval for QA. If you want the release pipeline to deploy to QA automatically (no approval) while still requiring approval for the deploy pipeline, create a separate environment (e.g., `Power Platform QA - Deploy`) and update `deploy-solution.yml` to reference it.
+> **Note:** ADO environment approval checks apply to **all** pipelines that use the environment. If you use `release-adhoc` against a named environment that already has an approval check, the ad-hoc run will also require approval.
 
 **To add an approval check:**
 
@@ -842,7 +831,7 @@ Create pipelines in this order:
 | 2 | `pipelines/release-solutions.yml` | `release-solutions` |
 | 3 | `pipelines/release-adhoc.yml` | `release-adhoc` |
 | 4 | `pipelines/export-solution-predev.yml` | `Export Solution from Pre-Dev` |
-| 5 | `pipelines/deploy-solution.yml` | `deploy-solution` |
+| 5 | `pipelines/deploy-solution.yml` | `deploy-solution` (Dev only) |
 | 6 | `pipelines/export-to-newdev.yml` | `export-for-new-dev` |
 | 7 | `pipelines/deploy-to-newdev.yml` | `deploy-to-newdev` |
 
@@ -862,10 +851,10 @@ Each pipeline must be authorized to use its variable group(s). After creating th
 | Variable Group | Used By |
 |---|---|
 | `PowerPlatform-PreDev` | Export Solution from Pre-Dev |
-| `PowerPlatform-Dev` | Daily Export Solutions, Deploy Solution (Dev stage), Export for New Dev |
-| `PowerPlatform-QA` | Release Solutions, Deploy Solution (QA stage) |
-| `PowerPlatform-Stage` | Release Solutions, Deploy Solution (Stage stage) |
-| `PowerPlatform-Prod` | Release Solutions, Deploy Solution (Prod stage) |
+| `PowerPlatform-Dev` | Daily Export Solutions, Deploy Solution, Export for New Dev |
+| `PowerPlatform-QA` | Release Solutions |
+| `PowerPlatform-Stage` | Release Solutions |
+| `PowerPlatform-Prod` | Release Solutions |
 | `PowerPlatform-NewDev` | Deploy to New Dev |
 | *(your group)* | Release Ad-Hoc (specified at runtime — no pre-authorization needed if the pipeline is set to allow all variable groups) |
 
@@ -883,7 +872,7 @@ Uses the `PowerPlatform-PreDev` variable group. No inline variables to configure
 
 **`pipelines/deploy-solution.yml`:**
 
-The deploy pipeline uses variable groups (`PowerPlatform-Dev`, `PowerPlatform-QA`, `PowerPlatform-Stage`, `PowerPlatform-Prod`) instead of inline variables. Update the variable group names in the YAML if yours differ from the defaults.
+The deploy pipeline uses the `PowerPlatform-Dev` variable group. Update the variable group name in the YAML if yours differs from the default.
 
 ### Step 9: Grant Repository Permissions
 
@@ -985,27 +974,22 @@ The pipeline deploys all solutions from the selected export run using the same v
 4. Enter the **Solution unique name** (exactly as it appears in Power Platform)
 5. Click **Run**
 
-The pipeline will export from Pre-Dev (unmanaged + managed directly via pac CLI), unpack, create an `export/predev/{timestamp}` branch, commit the solution files, create a PR to `main` (squash merge), and automatically trigger the deploy pipeline. The solution will deploy to Dev immediately, then pause at QA, Stage, and Prod for approval.
+The pipeline will export from Pre-Dev (unmanaged + managed directly via pac CLI), unpack, create an `export/predev/{timestamp}` branch, commit the solution files, create a PR to `main` (squash merge), and automatically trigger the deploy pipeline. The solution will deploy to Dev immediately.
 
-**For QA, Stage, and Prod:**
-
-1. After Dev completes successfully, approvers will receive a notification
-2. Go to **Pipelines** > select the running deploy pipeline
-3. Click **Review** on the QA, Stage, or Prod stage
-4. Click **Approve** to proceed
+To promote to QA, Stage, and Prod, run the **Release Ad-Hoc** pipeline using an `export-solutions` artifact for those environments.
 
 ### Deploy Solution (Manual)
 
-If you need to re-deploy a solution that's already been exported and committed:
+If you need to re-deploy a solution that's already been exported and committed to Dev:
 
 1. Go to **Pipelines** > select **deploy-solution**
 2. Click **Run pipeline**
 3. Enter the **Solution name** (must have a corresponding `solutions/managed/{name}.zip` in the repo)
 4. Click **Run**
 
-The solution will deploy through all four stages (Dev &rarr; QA &rarr; Stage &rarr; Prod), pausing at QA, Stage, and Prod for approval.
+The solution will deploy to Dev only.
 
-**Dry run:** Check the **Dry run** checkbox when running the pipeline manually to validate version checks and import arguments at every stage without making any changes.
+**Dry run:** Check the **Dry run** checkbox when running the pipeline manually to validate version checks and import arguments without making any changes.
 
 ### Verifying Results
 
@@ -1028,13 +1012,12 @@ The solution will deploy through all four stages (Dev &rarr; QA &rarr; Stage &ra
 | **Target environment** | Solutions are visible in the Power Platform maker portal at the expected versions |
 | **Target environment** | Cloud flows are turned on (check Power Automate portal &mdash; some may need manual activation if warnings appeared) |
 
-**After a deploy solution run (pipeline 4):**
+**After a deploy solution run (pipeline 5):**
 
 | Where | What to Check |
 |---|---|
-| **Pipeline logs (Dev stage)** | Solution shows "Deployment Complete" |
-| **Pipeline stages** | QA/Stage/Prod stages are paused waiting for approval (or already approved) |
-| **Target environment** | The solution is visible in the Power Platform maker portal in each deployed environment |
+| **Pipeline logs** | Solution shows "Deployment Complete" |
+| **Dev environment** | The solution is visible in the Power Platform maker portal at the expected version |
 
 ---
 
@@ -1119,10 +1102,7 @@ Common examples:
 | Deploy pipeline doesn't trigger | Pipeline name mismatch | Ensure the `source` value in `deploy-solution.yml` matches the exact name of the export pipeline in ADO |
 | Deploy pipeline doesn't trigger | Trigger branch filter | The export pipeline must run against `main` branch to trigger the deploy |
 | Deploy fails with auth error in Dev | Variable group misconfigured | Verify the `PowerPlatform-Dev` variable group has correct `EnvironmentUrl`, `ClientId`, `ClientSecret`, and `TenantId` |
-| Deploy fails with auth error in QA/Stage/Prod | Variable group misconfigured | Verify the corresponding variable group (`PowerPlatform-QA`, `PowerPlatform-Stage`, or `PowerPlatform-Prod`) has correct credentials |
 | Manual deploy says "solution not found" | Solution not in repo | Run the export pipeline first, or verify `solutions/managed/{name}.zip` exists in the repo |
-| QA/Stage/Prod stuck waiting | No one has approved | Approvers need to go to the pipeline run and click **Approve** on the pending stage |
-| "No solution zip found in artifact" in QA/Stage/Prod | Dev stage didn't publish artifact | Check the Dev stage logs &mdash; it may have failed before the publish step |
 | "Failed to push branch" | Build service lacks Contribute or Create branch permission | Grant the Build Service account **Contribute** and **Create branch** permissions on the repository (see Step 9) |
 | "Failed to create Pull Request" | Build service lacks Create pull request permission | Grant the Build Service account **Create pull requests** and **Contribute to pull requests** permissions on the repository (see Step 9) |
 | "Could not delete source branch" warning after PR merge | Build service lacks Force push permission | Grant **Force push (rewrite history, delete branches)** to the Build Service account on the repository (see Step 9) |
