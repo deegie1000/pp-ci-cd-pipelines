@@ -271,15 +271,19 @@ steps:
     persistCredentials: true
     fetchDepth: 0
 
-  # 2. Install Power Platform Build Tools
-  - task: PowerPlatformToolInstaller@2
+  # 2. Install pac CLI
+  - pwsh: dotnet tool install --global Microsoft.PowerApps.CLI.Tool
 
   # 3. Create output directories
   - pwsh: |
       # Ensure solutions/{unmanaged,unpacked,managed} exist
 
-  # 4. Export unmanaged solution
-  - task: PowerPlatformExportSolution@2
+  # 4. Authenticate pac CLI with Pre-Dev environment
+  # See patterns.md: "pac CLI with Variable Group" pattern
+
+  # 5. Export unmanaged solution
+  - pwsh: |
+      pac solution export --name ${{ parameters.solutionName }} --path ... --overwrite
     inputs:
       authenticationType: PowerPlatformSPN
       PowerPlatformSPN: $(PreDevServiceConnection)
@@ -289,37 +293,30 @@ steps:
       AsyncOperation: true
       MaxAsyncWaitTime: 60
 
-  # 5. Clean unpack
+  # 6. Clean unpack
   - pwsh: |
       # Delete existing unpacked folder if present
-  - task: PowerPlatformUnpackSolution@2
-    inputs:
-      SolutionInputFile: ...
-      SolutionTargetFolder: ...
-      SolutionType: Unmanaged
-      ProcessCanvasApps: true
+      pac solution unpack --zipfile ... --folder ... --allowDelete true --allowWrite true
 
-  # 6. Pack as managed
-  - task: PowerPlatformPackSolution@2
-    inputs:
-      SolutionSourceFolder: ...
-      SolutionTargetFolder: ...
-      SolutionType: Managed
-      ProcessCanvasApps: true
+  # 7. Export managed solution
+  - pwsh: |
+      pac solution export --name ${{ parameters.solutionName }} --path ... --managed --overwrite
 
-  # 7. Commit and push
+  # 8. Commit and push
   - pwsh: |
       git config user.email "pipeline@dev.azure.com"
       git config user.name "Azure DevOps Pipeline"
       git add solutions/
       # Check for changes, commit, push
 
-  # 8. Stage artifacts (managed zip + deployment settings)
+  # 9. Create PR to main (auto-complete, squash merge, delete source branch)
+
+  # 10. Stage artifacts (managed zip + deploymentSettings_Dev.json)
   - pwsh: |
       # Copy managed zip to staging
-      # Copy deploymentSettings_{first_env}.json from root if exists
+      # Copy deploymentSettings_Dev.json from deploymentSettings/preDev/ if exists
 
-  # 9. Publish artifact
+  # 11. Publish artifact
   - task: PublishPipelineArtifact@1
     inputs:
       targetPath: $(Build.ArtifactStagingDirectory)
@@ -328,10 +325,10 @@ steps:
 
 ### Key Generation Rules
 
-- Uses ADO tasks (not pac CLI) for export/unpack/pack
-- Commits to the current branch (typically `main`)
+- Uses pac CLI for all operations (no ADO Power Platform tasks needed)
+- Commits to a new `export/predev/{timestamp}` branch, creates PR to main
 - Artifact name is `ManagedSolution` (singular — single solution)
-- Deployment settings for the first environment only (e.g., `deploymentSettings_Dev.json`)
+- Only stages `deploymentSettings_Dev.json` (pre-dev deploys to Dev only)
 
 ---
 
@@ -358,20 +355,25 @@ parameters:
     displayName: "Solution name (required for manual runs, ignored for auto-triggered)"
     type: string
     default: ""
+  - name: dryRun
+    displayName: "Dry run (validate only — no imports)"
+    type: boolean
+    default: false
 
 pool:
   vmImage: "windows-latest"
 
 stages:
-  # First stage: inline (handles auto-trigger + manual, publishes artifact)
-  - stage: {first_env_short}                   # e.g., "Dev"
-    displayName: "Deploy to {first_env}"
+  # Single stage: Dev only. Handles auto-trigger + manual.
+  # For QA/Stage/Prod promotion, use release-adhoc pipeline.
+  - stage: Dev
+    displayName: "Deploy to Dev"
     variables:
-      - group: {first_env_var_group}           # e.g., "PowerPlatform-Dev"
+      - group: PowerPlatform-Dev
     jobs:
       - deployment: Deploy
-        displayName: "Deploy solution to {first_env}"
-        environment: "{first_env_ado_env}"     # e.g., "Power Platform Dev"
+        displayName: "Deploy solution to Dev"
+        environment: "Power Platform Dev"
         strategy:
           runOnce:
             deploy:
@@ -379,129 +381,37 @@ stages:
                 # 1. Checkout (for manual runs + deployment settings)
                 - checkout: self
 
-                # 2. Download artifact (auto-triggered only)
+                # 2. Download artifact (auto-triggered only, graceful skip on manual)
                 - download: exportSolution
                   artifact: ManagedSolution
-                  condition: eq(variables['Build.Reason'], 'ResourceTrigger')
+                  continueOnError: true
 
-                # 3. Install PP Build Tools
-                - task: PowerPlatformToolInstaller@2
+                # 3. Authenticate pac CLI
 
-                # 4. Authenticate pac CLI
-
-                # 5. Resolve solution path
+                # 4. Resolve solution path
                 #    Auto: find zip in artifact
                 #    Manual: use repo (solutions/managed/{name}.zip)
 
-                # 6. Check for deployment settings
+                # 5. Check for deploymentSettings_Dev.json
                 #    Auto: in artifact folder
-                #    Manual: in deploymentSettings/ root
+                #    Manual: in deploymentSettings/preDev/
 
-                # 7. Import solution (pac solution import)
+                # 6. Import solution (pac solution import)
 
-                # 8. Upsert config data (if build.json has configData)
+                # 7. Upsert config data (if build.json has configData in artifact)
                 #    - Read build.json from artifact (auto-triggered only)
                 #    - Run scripts/Sync-ConfigData.ps1 -Mode Upsert
-
-                # 9. Stage + publish artifact for downstream stages
-                #    Include build.json and configData files if auto-triggered
-                - task: PublishPipelineArtifact@1
-                  inputs:
-                    targetPath: $(Build.ArtifactStagingDirectory)/DeploySolution
-                    artifact: DeploySolution
-
-  # Subsequent stages: use template
-  - template: templates/deploy-single-solution.yml
-    parameters:
-      stageName: "{env_2_short}"               # e.g., "QA"
-      displayName: "Deploy to {env_2}"
-      environmentName: "{env_2_ado_env}"
-      variableGroup: "{env_2_var_group}"
-      dependsOn: "{first_env_short}"
-
-  # ... repeat for each subsequent environment
 ```
 
 ### Key Generation Rules
 
-- First stage is always inline (not from template) because it handles the dual auto/manual trigger logic
-- First stage publishes `DeploySolution` artifact for downstream stages
-- Downstream stages use `deploy-single-solution.yml` template
-- `dependsOn` chains stages: first → second → third → fourth
+- Single stage (Dev only) — no downstream stages, no artifact re-publishing
+- Handles both auto-triggered (artifact download) and manual (repo path) runs
+- Deployment settings key is always `Dev` for this pipeline
 
 ---
 
-## 6. Deploy Single Solution Template (`templates/deploy-single-solution.yml`)
-
-### Structure
-
-```yaml
-# Header comment block
-
-parameters:
-  - name: stageName
-    type: string
-  - name: displayName
-    type: string
-  - name: environmentName
-    type: string
-  - name: variableGroup
-    type: string
-  - name: dependsOn
-    type: string
-    default: ""
-
-stages:
-  - stage: ${{ parameters.stageName }}
-    displayName: ${{ parameters.displayName }}
-    ${{ if eq(parameters.dependsOn, '') }}:
-      dependsOn: []
-    ${{ else }}:
-      dependsOn: ${{ parameters.dependsOn }}
-    variables:
-      - group: ${{ parameters.variableGroup }}
-    jobs:
-      - deployment: Deploy
-        displayName: "Deploy solution to ${{ parameters.stageName }}"
-        environment: ${{ parameters.environmentName }}
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                # 1. Download solution from Dev stage
-                - download: current
-                  artifact: DeploySolution
-
-                # 2. Checkout for deployment settings
-                - checkout: self
-
-                # 3. Install PP Build Tools
-                - task: PowerPlatformToolInstaller@2
-
-                # 4. Authenticate pac CLI
-
-                # 5. Import solution
-                #    - Find zip in DeploySolution artifact
-                #    - Check for deploymentSettings_{stageName}.json in repo root
-                #    - Import with --stage-and-upgrade --skip-lower-version --activate-plugins
-                #    - Apply --settings-file if found
-
-                # 6. Upsert config data (if build.json has configData in artifact)
-                #    - Read build.json from DeploySolution artifact
-                #    - Run scripts/Sync-ConfigData.ps1 -Mode Upsert
-```
-
-### Key Generation Rules
-
-- Downloads from `current` pipeline (not external pipeline resource)
-- Artifact name is `DeploySolution` (published by first stage)
-- Deployment settings come from the repo (`deploymentSettings/deploymentSettings_{stage}.json`)
-- Config data files come from the `DeploySolution` artifact (passed through from Dev stage)
-- Simpler than deploy-environment.yml (no build.json, no multi-solution loop, no version check)
-
----
-
-## README Generation Template
+## 6. README Generation Template
 
 ### Sections to Generate
 

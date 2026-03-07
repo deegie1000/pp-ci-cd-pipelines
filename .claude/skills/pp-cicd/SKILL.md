@@ -29,7 +29,7 @@ Before generating anything, ask the user the following questions. Use the AskUse
 1. **Scheduled daily export** — Nightly export from Dev, validate versions, PR to main
 2. **Multi-solution release pipeline** — Deploy multiple solutions from build.json through environments
 3. **On-demand single-solution export** — Export from a "Pre-Dev" or sandbox environment
-4. **Multi-stage single-solution deploy** — Deploy a single solution through all environments with approvals
+4. **Dev-only single-solution deploy** — Deploy a single solution from Pre-Dev into the Dev environment
 5. **Deployment settings** — Environment-specific connection references and environment variables
 6. **Post-export version management** — Auto-bump solution versions in Dev after export
 7. **Cloud flow activation** — Activate cloud flows after deployment (via Dataverse API)
@@ -100,32 +100,29 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
 
 4. **`pipelines/export-solution-predev.yml`** (if on-demand export enabled) — Single solution export. Key decisions:
    - Manual trigger with `solutionName` parameter
-   - Auth: service connection (no secrets in YAML)
-   - Uses ADO tasks (`PowerPlatformExportSolution@2`, etc.)
-   - Commits to repo, publishes artifact, triggers deploy pipeline
+   - Auth: pac CLI with variable group (no ADO tasks, no service connection needed)
+   - Uses pac CLI for export, unpack, and auth (`pac solution export`, `pac solution unpack`)
+   - Commits to `export/predev/{timestamp}` branch, creates PR to main, publishes `ManagedSolution` artifact, triggers deploy pipeline
 
-5. **`pipelines/deploy-solution.yml`** (if multi-stage deploy enabled) — Multi-stage single-solution deploy. Key decisions:
+5. **`pipelines/deploy-solution.yml`** (if on-demand export enabled) — Dev-only single-solution deploy. Key decisions:
    - Triggered by pre-dev export pipeline completion
-   - First stage (Dev): inline, handles auto-trigger + manual, publishes `DeploySolution` artifact (including build.json and config data files)
-   - Subsequent stages: use `deploy-single-solution.yml` template, download from Dev stage
-   - Config data upsert (if enabled): runs after solution import in each stage
-   - Auth: variable groups for all stages
-   - Approval gates on environments (per user config)
+   - Single stage (Dev): handles auto-trigger + manual, imports solution into Dev
+   - Config data upsert (if enabled): runs after solution import
+   - Auth: `PowerPlatform-Dev` variable group only
+   - No downstream stages — for QA/Stage/Prod promotion, use `release-adhoc` pipeline
 
 ### 3c. Templates
 
 6. **`pipelines/templates/deploy-environment.yml`** (if multi-solution release enabled) — Reusable template for multi-solution deployment. Parameters: `stageName`, `displayName`, `environmentName`, `variableGroup`, `dependsOn`.
 
-7. **`pipelines/templates/deploy-single-solution.yml`** (if multi-stage deploy enabled) — Reusable template for single-solution deployment. Same parameter pattern as deploy-environment.
-
 ### 3d. Scripts
 
-8. **`scripts/Merge-DeploymentSettings.ps1`** (if deployment settings enabled) — Merge deployment settings from export folder into root. Key algorithm:
+7. **`scripts/Merge-DeploymentSettings.ps1`** (if deployment settings enabled) — Merge deployment settings from export folder into root. Key algorithm:
    - EnvironmentVariables matched by `SchemaName` (export overwrites root)
    - ConnectionReferences matched by `LogicalName` (export overwrites root)
    - New items appended; existing items not in export preserved
 
-9. **`scripts/Sync-ConfigData.ps1`** (if config data migration enabled) — Extract and upsert configuration data. Two modes:
+8. **`scripts/Sync-ConfigData.ps1`** (if config data migration enabled) — Extract and upsert configuration data. Two modes:
    - `-Mode Extract`: Queries OData from Dev, writes JSON data files to `configData/`
    - `-Mode Upsert`: Reads JSON data files and PATCHes each record by stable GUID into target environment
    - Handles OData pagination (`@odata.nextLink`)
@@ -198,9 +195,8 @@ These are the **hardened design decisions** from production use. Do not deviate 
 ### Artifact Flow
 - Daily export publishes `ManagedSolutions` artifact → consumed by release pipeline
   - Contains: build.json, `{name}_{version}.zip` files, `deploymentSettings_*.json`, `configData/*.json`
-- Pre-dev export publishes `ManagedSolution` artifact → consumed by deploy pipeline Dev stage
-- Deploy pipeline Dev stage re-publishes as `DeploySolution` artifact → consumed by downstream stages
-  - If auto-triggered: includes build.json and configData files from upstream artifact
+- Pre-dev export publishes `ManagedSolution` artifact → consumed by deploy pipeline (Dev only)
+- Deploy pipeline imports into Dev only; no downstream artifact re-publishing
 - Artifact always contains solution zips named `{name}_{version}.zip` (daily) or `{name}.zip` (pre-dev)
 
 ### Deployment Settings Strategy
