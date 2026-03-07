@@ -421,7 +421,8 @@ The `build.json` file defines which solutions to export and their **expected ver
   "solutions": [
     { "name": "CoreComponents", "version": "1.2.0.0", "postExportVersion": "1.3.0.0", "createNewPatch": true },
     { "name": "CustomConnectors", "version": "1.0.3.0", "postExportVersion": "1.0.4.0", "createNewPatch": false },
-    { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true }
+    { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true },
+    { "name": "ThirdPartyBase", "version": "3.5.0.0", "isExisting": true, "isUnmanaged": true }
   ],
   "configData": [
     {
@@ -449,7 +450,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions[].includesCloudFlows` | **Auto-detected** boolean. Set to `true` by the export pipeline if the unpacked solution contains cloud flows (`.json` files in the `Workflows/` directory). Do not set this manually &mdash; it is written by the pipeline during export. |
 | `solutions[].isExisting` | Optional boolean (default: `false`). If `true`, the export pipeline skips exporting this solution from Power Platform and uses a pre-existing zip already committed to the repo. The source directory depends on `isUnmanaged`: if `isUnmanaged: true`, the zip is read from `solutions/unmanaged/{name}_{version}.zip`; otherwise it is read from `solutions/managed/{name}_{version}.zip`. The pipeline fails if the expected zip is not found. |
 | `solutions[].isRollback` | Optional boolean (default: `false`). If `true`, the deploy pipelines omit `--skip-lower-version` when importing this solution, allowing a lower (rollback) version to be installed over a higher one. Applies to all stages (Dev, QA, Stage, Prod). |
-| `solutions[].isUnmanaged` | Optional boolean (default: `false`). When `true`: (1) **`isExisting` source** — the export pipeline reads the pre-existing zip from `solutions/unmanaged/` instead of `solutions/managed/`. (2) **Daily export release** — the release pipeline (`deploy-environment.yml`) imports the solution as unmanaged (direct import, no staged upgrade). (3) **New Dev pipelines** — `export-for-new-dev` stages the unmanaged zip in the artifact and `deploy-to-newdev` imports it as unmanaged. |
+| `solutions[].isUnmanaged` | Optional boolean (default: `false`). Has two independent effects: **Export effect** (only applies when `isExisting: true`) — reads the pre-existing zip from `solutions/unmanaged/{name}_{version}.zip` instead of `solutions/managed/`. Without `isExisting: true`, the export pipeline always produces and stages a managed zip regardless of this flag. **Deploy effect** (all stages — Dev, QA, Stage, Prod) — skips `--stage-and-upgrade` and `--skip-lower-version` when importing. The zip content (managed vs unmanaged) is determined by what the export staged, so this flag only causes a truly unmanaged import when paired with `isExisting: true`. Use `isExisting: true` + `isUnmanaged: true` together to release a pre-existing unmanaged zip through the full pipeline to any environment. |
 
 ### Config Data Fields
 
@@ -1052,6 +1053,7 @@ Common examples:
 |---|---|---|
 | Pipeline shows as **Cancelled** with "No export branch found" | No branch matching `export/{today}-*` exists | This is expected on nights with no planned release — create the export branch and push it before the scheduled run when a release is needed. The release pipeline will not trigger on cancelled runs. |
 | "build.json not found" | The `exports/{subfolder}/build.json` file is missing on the export branch | Ensure the file path matches the branch name (minus the `export/` prefix) |
+| "build.json validation failed: isUnmanaged=true requires isExisting=true" | A solution has `isUnmanaged: true` without `isExisting: true` | The export pipeline always produces a managed zip for non-existing solutions, so `isUnmanaged` only has meaning when paired with `isExisting: true`. Either add `"isExisting": true` or remove `isUnmanaged` from the solution entry. |
 | "Version mismatch for '...'" | The solution version in Dev doesn't match the version in `build.json` | Update `build.json` to match the current version in Dev, or update the version in Dev to match `build.json` |
 | "Failed to authenticate with Power Platform" | Secret variables are missing or incorrect | Verify `ClientId`, `ClientSecret`, and `TenantId` in pipeline variables |
 | "Failed to export solution" | Solution name doesn't match, or SPN lacks permissions | Verify the solution unique name in Power Platform and the app user's security role |

@@ -203,6 +203,19 @@ steps:
         }
       }
 
+      # Validate: isUnmanaged=true requires isExisting=true
+      $invalidSolutions = @($solutions | Where-Object {
+        $_.PSObject.Properties["isUnmanaged"] -and [bool]$_.isUnmanaged -and
+        -not ($_.PSObject.Properties["isExisting"] -and [bool]$_.isExisting)
+      })
+      if ($invalidSolutions.Count -gt 0) {
+        foreach ($s in $invalidSolutions) {
+          Write-Host "  Invalid: '$($s.name)' has isUnmanaged=true but isExisting is not true."
+        }
+        Write-Error "build.json validation failed: isUnmanaged=true requires isExisting=true. The export pipeline always produces a managed zip for non-existing solutions, so isUnmanaged has no effect on the artifact and would cause a misleading import. Set isExisting=true or remove isUnmanaged."
+        exit 1
+      }
+
       # Pass solutions list as a JSON variable for subsequent steps
       $solutionsJson = if ($solutions.Count -gt 0) { @($solutions) | ConvertTo-Json -Compress } else { "[]" }
       Write-Host "##vso[task.setvariable variable=SolutionsList]$solutionsJson"
