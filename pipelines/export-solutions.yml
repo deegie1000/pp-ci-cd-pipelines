@@ -113,7 +113,10 @@ steps:
 
         if ($LASTEXITCODE -ne 0 -or -not $refs) {
           Write-Host "No export branch found for date $targetDate — cancelling pipeline."
-          Write-Host "##vso[task.complete result=Cancelled;]No export branch found for $targetDate"
+          $headers = @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+          $body = '{"status":"cancelling"}'
+          Invoke-RestMethod -Uri "$env:SYSTEM_TEAMFOUNDATIONCOLLECTIONURI$env:SYSTEM_TEAMPROJECTID/_apis/build/builds/$($env:BUILD_BUILDID)?api-version=7.1" `
+            -Method PATCH -Headers $headers -Body $body -ContentType "application/json" | Out-Null
           exit 0
         }
 
@@ -146,6 +149,8 @@ steps:
       Write-Host "##vso[build.updatebuildnumber]$subfolder"
       Write-Host "##vso[build.addbuildtag]$exportBranch"
     displayName: "Detect export branch"
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
   # ===========================================================================
   # Step 5: Checkout the export branch
