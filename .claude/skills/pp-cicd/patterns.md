@@ -291,10 +291,6 @@ if ($ppConfig -and $ppDeployMode -and -not $isUnmanaged) {
     "UPDATE"          { } # plain import — no staging flags
     "STAGE_FOR_UPGRADE" { $importArgs += "--import-as-holding" }
   }
-  if ($ppConfig.addAllExistingSiteComponentsForSites) {
-    $importArgs += "--add-existing-website-components"
-    $importArgs += $ppConfig.addAllExistingSiteComponentsForSites
-  }
 } elseif ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
   $importArgs += "--stage-and-upgrade"
   $importArgs += "--skip-lower-version"

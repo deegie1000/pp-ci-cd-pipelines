@@ -228,7 +228,7 @@ These are the **hardened design decisions** from production use. Do not deviate 
   - `UPGRADE` → `--stage-and-upgrade --skip-lower-version`
   - `UPDATE` → no staging flags (plain import)
   - `STAGE_FOR_UPGRADE` → `--import-as-holding`
-  - `powerPagesConfiguration.addAllExistingSiteComponentsForSites` → `--add-existing-website-components <value>`
+
 - Solution import via `pac solution import` (pac CLI, not ADO tasks) for deployment stages
 
 ### PR Automation (Daily Export)

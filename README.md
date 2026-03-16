@@ -156,7 +156,7 @@ Deploys managed solutions through three environments in sequence: **Test &rarr; 
    - **Fresh install** &mdash; if the solution doesn't exist in the target environment: imports with `--activate-plugins`
    - **Upgrade (managed)** &mdash; if the solution exists at a different version and `isUnmanaged` is not set: imports with `--stage-and-upgrade --skip-lower-version --activate-plugins`
    - **Unmanaged import** &mdash; if `isUnmanaged: true`: imports directly without `--stage-and-upgrade`, regardless of whether the solution is already installed. Use this when the artifact zip is an unmanaged solution.
-   - **Power Pages import** &mdash; if `powerPagesConfiguration` is set, the `deployMode` field overrides the default import strategy: `UPGRADE` forces `--stage-and-upgrade`, `UPDATE` uses a plain import, `STAGE_FOR_UPGRADE` uses `--import-as-holding`. The `addAllExistingSiteComponentsForSites` field, if set, is passed as `--add-existing-website-components`.
+   - **Power Pages import** &mdash; if `powerPagesConfiguration` is set, the `deployMode` field overrides the default import strategy: `UPGRADE` forces `--stage-and-upgrade`, `UPDATE` uses a plain import, `STAGE_FOR_UPGRADE` uses `--import-as-holding`.
    - If the solution has `includeDeploymentSettings: true` in `build.json`, applies the matching `deploymentSettings_{stage}.json` file via `--settings-file`
    - If the solution has `includesCloudFlows: true`, checks for inactive cloud flows after import and attempts to activate them. Activation failures are logged as **warnings** but do not fail the deployment
 6. **Upserts configuration data** &mdash; if `configData` is defined in `build.json`, PATCHes each record into the target environment using stable GUIDs. Record-level failures are logged as **warnings** but do not fail the deployment. See [Configuration Data](#configuration-data)
@@ -279,7 +279,7 @@ The `build.json` file defines which solutions to export and their **expected ver
     { "name": "CustomConnectors", "version": "1.0.3.0", "postExportVersion": "1.0.4.0", "createNewPatch": false },
     { "name": "MainApp", "version": "2.1.0.0", "includeDeploymentSettings": true },
     { "name": "ThirdPartyBase", "version": "3.5.0.0", "isExisting": true, "isUnmanaged": true },
-    { "name": "PowerPagesPortal", "version": "1.0.0.0", "powerPagesConfiguration": { "addAllExistingSiteComponentsForSites": "my-portal-site", "deployMode": "UPGRADE" } }
+    { "name": "PowerPagesPortal", "version": "1.0.0.0", "powerPagesConfiguration": { "deployMode": "UPGRADE" } }
   ],
   "configData": [
     {
@@ -310,7 +310,7 @@ The `build.json` file defines which solutions to export and their **expected ver
 | `solutions[].isUnmanaged` | Optional boolean (default: `false`). Has two independent effects: **Export effect** (only applies when `isExisting: true`) — reads the pre-existing zip from `solutions/unmanaged/{name}_{version}.zip` instead of `solutions/managed/`. Without `isExisting: true`, the export pipeline always produces and stages a managed zip regardless of this flag. **Deploy effect** (all stages — Dev, Test, Stage, Prod) — skips `--stage-and-upgrade` and `--skip-lower-version` when importing. The zip content (managed vs unmanaged) is determined by what the export staged, so this flag only causes a truly unmanaged import when paired with `isExisting: true`. Use `isExisting: true` + `isUnmanaged: true` together to release a pre-existing unmanaged zip through the full pipeline to any environment. |
 | `solutions[].powerPagesConfiguration` | Optional object. When set, overrides the default import strategy for this solution to use Power Pages-specific deployment behavior. Has no effect if `isUnmanaged: true`. See sub-fields below. |
 | `solutions[].powerPagesConfiguration.deployMode` | Required when `powerPagesConfiguration` is set. Controls the `pac solution import` strategy: `UPGRADE` — uses `--stage-and-upgrade --skip-lower-version` (regardless of whether the solution is already installed); `UPDATE` — plain import with no staging flags; `STAGE_FOR_UPGRADE` — uses `--import-as-holding` to stage the solution without applying the upgrade. |
-| `solutions[].powerPagesConfiguration.addAllExistingSiteComponentsForSites` | Optional string. When set, passes `--add-existing-website-components <value>` to `pac solution import`. Use this to include all existing site components for the specified Power Pages site during import. |
+| `solutions[].powerPagesConfiguration.addAllExistingSiteComponentsForSites` | Optional string. Reserved for export-side use. Not used during deployment. |
 
 ### Config Data Fields
 

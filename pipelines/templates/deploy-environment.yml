@@ -284,9 +284,6 @@ stages:
                         }
                         Write-Host "  powerPagesConfiguration detected:"
                         Write-Host "    deployMode = $ppDeployMode"
-                        if ($ppConfig.PSObject.Properties['addAllExistingSiteComponentsForSites'] -and $ppConfig.addAllExistingSiteComponentsForSites) {
-                          Write-Host "    addAllExistingSiteComponentsForSites = $($ppConfig.addAllExistingSiteComponentsForSites)"
-                        }
                       }
 
                       # Check if already installed at this version
@@ -361,10 +358,6 @@ stages:
                               $importArgs += "--skip-lower-version"
                             }
                           }
-                        }
-                        if ($ppConfig.PSObject.Properties['addAllExistingSiteComponentsForSites'] -and $ppConfig.addAllExistingSiteComponentsForSites) {
-                          $importArgs += "--add-existing-website-components"
-                          $importArgs += $ppConfig.addAllExistingSiteComponentsForSites
                         }
                       } elseif ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
                         $importArgs += "--stage-and-upgrade"
