@@ -231,6 +231,21 @@ These are the **hardened design decisions** from production use. Do not deviate 
 
 - Solution import via `pac solution import` (pac CLI, not ADO tasks) for deployment stages
 
+### Power Pages Site Component Population (Export)
+- Runs as a dedicated pipeline step **before** the solution export loop (Step 8 in export-solutions.yml)
+- Triggered per-solution when `powerPagesConfiguration.addAllExistingSiteComponentsForSites` is non-empty
+- Parses the comma-delimited site name string into an array; trims whitespace
+- Acquires its own OAuth token (client credentials) for Dataverse REST API — same pattern as config data extraction
+- Delegates to `scripts/Add-PowerPagesSiteComponents.ps1` once per solution
+- The script:
+  1. Resolves `powerpagesite` and `powerpagecomponent` component type integers from `solutioncomponentdefinitions`
+  2. Resolves the target solution ID from `solutions`
+  3. Snapshots existing table (Entity type 1) components before making changes
+  4. For each site name: finds the `powerpagesite` record, adds it to the solution, then diffs all `powerpagecomponent` records for that site against existing solution membership and adds only the missing ones — all with `AddRequiredComponents = false`
+  5. Removes any table components added inadvertently (compares post-run state against pre-run snapshot)
+- Hard-fails if a named site is not found or if any component fails to add
+- Uses Dataverse OData API (`AddSolutionComponent` / `RemoveSolutionComponent` unbound actions)
+
 ### PR Automation (Daily Export)
 - Create PR from export branch to main
 - Set auto-complete with squash merge

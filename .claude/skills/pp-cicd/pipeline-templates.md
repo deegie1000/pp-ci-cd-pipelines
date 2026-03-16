@@ -246,6 +246,7 @@ stages:
 - Cloud flow activation is optional — only generate that section if feature enabled
 - Config data upsert is optional — only generate if config data migration enabled
 - Power Pages import strategy: read `powerPagesConfiguration` per solution; `deployMode` (UPGRADE/UPDATE/STAGE_FOR_UPGRADE) overrides the default `--stage-and-upgrade` logic; has no effect when `isUnmanaged: true`
+- Power Pages site component population (export only): `powerPagesConfiguration.addAllExistingSiteComponentsForSites` — comma-delimited site names; handled by Step 8 in export-solutions.yml via `scripts/Add-PowerPagesSiteComponents.ps1` before the export loop; not relevant to deploy templates
 - The entire deploy loop is one PowerShell step (for variable sharing)
 
 ---

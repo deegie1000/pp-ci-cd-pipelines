@@ -255,7 +255,80 @@ steps:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 8: Export solutions (unmanaged), clean unpack, and pack as managed
+  # Step 8: Add Power Pages site components to solutions (if configured)
+  # ===========================================================================
+  # For each solution whose powerPagesConfiguration.addAllExistingSiteComponentsForSites
+  # is populated, adds all existing powerpagesite and powerpagecomponent records
+  # from the dev environment into the solution before export.
+  # Runs before export so the components are captured in the solution zip.
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+
+      $solutions = @($env:SolutionsList | ConvertFrom-Json)
+
+      $ppSolutions = @($solutions | Where-Object {
+        $_.PSObject.Properties["powerPagesConfiguration"] -and
+        $_.powerPagesConfiguration -and
+        $_.powerPagesConfiguration.PSObject.Properties["addAllExistingSiteComponentsForSites"] -and
+        $_.powerPagesConfiguration.addAllExistingSiteComponentsForSites
+      })
+
+      if ($ppSolutions.Count -eq 0) {
+        Write-Host "No solutions with addAllExistingSiteComponentsForSites configured — skipping."
+        exit 0
+      }
+
+      Write-Host "$($ppSolutions.Count) solution(s) with Power Pages site components to populate."
+
+      $envUrl = "$(EnvironmentUrl)".TrimEnd("/")
+
+      # Acquire OAuth token for Dataverse Web API
+      $tokenUrl = "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token"
+      $tokenBody = @{
+        grant_type    = "client_credentials"
+        client_id     = "$(ClientId)"
+        client_secret = $env:ClientSecret
+        scope         = "$envUrl/.default"
+      }
+      $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Post -Body $tokenBody
+      $apiHeaders = @{
+        "Authorization"    = "Bearer $($tokenResponse.access_token)"
+        "OData-MaxVersion" = "4.0"
+        "OData-Version"    = "4.0"
+        "Content-Type"     = "application/json"
+        "Accept"           = "application/json"
+      }
+      Write-Host "Authenticated with Dataverse API."
+
+      $sourceDir = "$(Build.SourcesDirectory)"
+      $addScript = Join-Path $sourceDir "scripts/Add-PowerPagesSiteComponents.ps1"
+
+      foreach ($solution in $ppSolutions) {
+        $solutionName = $solution.name
+        $sitesRaw     = $solution.powerPagesConfiguration.addAllExistingSiteComponentsForSites
+        $siteNames    = @($sitesRaw -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+        Write-Host ""
+        Write-Host "Solution '$solutionName' — sites: $($siteNames -join ', ')"
+
+        & $addScript `
+          -SolutionUniqueName $solutionName `
+          -SiteNames $siteNames `
+          -EnvironmentUrl $envUrl `
+          -ApiHeaders $apiHeaders
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Failed to add Power Pages site components for solution '$solutionName'."
+          exit 1
+        }
+      }
+    displayName: "Add Power Pages site components to solutions"
+    condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'), eq(variables['HasSolutions'], 'true'))
+    env:
+      ClientSecret: $(ClientSecret)
+
+  # ===========================================================================
+  # Step 9: Export solutions (unmanaged), clean unpack, and pack as managed
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -530,7 +603,7 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'), eq(variables['HasSolutions'], 'true'))
 
   # ===========================================================================
-  # Step 9: Stage artifacts and set config data variables
+  # Step 10: Stage artifacts and set config data variables
   # ===========================================================================
   # Always runs (when export branch found) — stages build.json and deployment
   # settings files to the artifact, then reads configData from build.json so
@@ -570,7 +643,7 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 10: Extract configuration data from Dev (if configData defined)
+  # Step 11: Extract configuration data from Dev (if configData defined)
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -630,7 +703,7 @@ steps:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 11: Publish managed solutions and build.json as pipeline artifact
+  # Step 12: Publish managed solutions and build.json as pipeline artifact
   # ===========================================================================
   - task: PublishPipelineArtifact@1
     displayName: "Publish managed solution artifacts"
@@ -640,7 +713,7 @@ steps:
       artifact: ManagedSolutions
 
   # ===========================================================================
-  # Step 12: Merge export deployment settings into root
+  # Step 13: Merge export deployment settings into root
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -662,7 +735,7 @@ steps:
     condition: and(succeeded(), eq(variables['ExportBranchFound'], 'true'))
 
   # ===========================================================================
-  # Step 13: Commit and push changes to the export branch
+  # Step 14: Commit and push changes to the export branch
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
