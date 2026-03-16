@@ -37,11 +37,11 @@ Describe "Merge-DeploymentSettings" {
         )
       } | ConvertTo-Json -Depth 10
 
-      Set-Content -Path (Join-Path $script:exportDir "deploymentSettings_QA.json") -Value $exportContent
+      Set-Content -Path (Join-Path $script:exportDir "deploymentSettings_Test.json") -Value $exportContent
 
       & $scriptPath -ExportFolder $script:exportDir -RootFolder $script:rootDir
 
-      $rootFile = Join-Path $script:rootDir "deploymentSettings_QA.json"
+      $rootFile = Join-Path $script:rootDir "deploymentSettings_Test.json"
       $rootFile | Should -Exist
 
       $result = Get-Content $rootFile -Raw | ConvertFrom-Json
@@ -62,7 +62,7 @@ Describe "Merge-DeploymentSettings" {
         )
         ConnectionReferences = @()
       } | ConvertTo-Json -Depth 10
-      Set-Content -Path (Join-Path $script:rootDir "deploymentSettings_QA.json") -Value $rootContent
+      Set-Content -Path (Join-Path $script:rootDir "deploymentSettings_Test.json") -Value $rootContent
 
       # Export adds a new variable
       $exportContent = @{
@@ -73,11 +73,11 @@ Describe "Merge-DeploymentSettings" {
           @{ LogicalName = "cr5a4_NewConn"; ConnectionId = "conn-new"; ConnectorId = "/apis/shared_new" }
         )
       } | ConvertTo-Json -Depth 10
-      Set-Content -Path (Join-Path $script:exportDir "deploymentSettings_QA.json") -Value $exportContent
+      Set-Content -Path (Join-Path $script:exportDir "deploymentSettings_Test.json") -Value $exportContent
 
       & $scriptPath -ExportFolder $script:exportDir -RootFolder $script:rootDir
 
-      $result = Get-Content (Join-Path $script:rootDir "deploymentSettings_QA.json") -Raw | ConvertFrom-Json
+      $result = Get-Content (Join-Path $script:rootDir "deploymentSettings_Test.json") -Raw | ConvertFrom-Json
       $result.EnvironmentVariables.Count | Should -Be 2
       $result.EnvironmentVariables[0].SchemaName | Should -Be "cr5a4_Existing"
       $result.EnvironmentVariables[0].Value | Should -Be "original"
@@ -163,7 +163,7 @@ Describe "Merge-DeploymentSettings" {
   Context "when multiple environment files exist" {
     It "merges each environment file independently" {
       # Create root files
-      foreach ($env in @("QA", "Stage")) {
+      foreach ($env in @("Test", "Stage")) {
         $rootContent = @{
           EnvironmentVariables = @(
             @{ SchemaName = "cr5a4_Root_$env"; Value = "root-$env" }
@@ -174,7 +174,7 @@ Describe "Merge-DeploymentSettings" {
       }
 
       # Create export files
-      foreach ($env in @("QA", "Stage")) {
+      foreach ($env in @("Test", "Stage")) {
         $exportContent = @{
           EnvironmentVariables = @(
             @{ SchemaName = "cr5a4_Export_$env"; Value = "export-$env" }
@@ -186,7 +186,7 @@ Describe "Merge-DeploymentSettings" {
 
       & $scriptPath -ExportFolder $script:exportDir -RootFolder $script:rootDir
 
-      foreach ($env in @("QA", "Stage")) {
+      foreach ($env in @("Test", "Stage")) {
         $result = Get-Content (Join-Path $script:rootDir "deploymentSettings_$env.json") -Raw | ConvertFrom-Json
         $result.EnvironmentVariables.Count | Should -Be 2
         $result.EnvironmentVariables[0].SchemaName | Should -Be "cr5a4_Root_$env"
@@ -205,17 +205,17 @@ Describe "Merge-DeploymentSettings" {
           @{ LogicalName = "cr5a4_KeepConn"; ConnectionId = "keep-conn"; ConnectorId = "/apis/shared_keep" }
         )
       } | ConvertTo-Json -Depth 10
-      Set-Content -Path (Join-Path $script:rootDir "deploymentSettings_QA.json") -Value $rootContent
+      Set-Content -Path (Join-Path $script:rootDir "deploymentSettings_Test.json") -Value $rootContent
 
       $exportContent = @{
         EnvironmentVariables = @()
         ConnectionReferences = @()
       } | ConvertTo-Json -Depth 10
-      Set-Content -Path (Join-Path $script:exportDir "deploymentSettings_QA.json") -Value $exportContent
+      Set-Content -Path (Join-Path $script:exportDir "deploymentSettings_Test.json") -Value $exportContent
 
       & $scriptPath -ExportFolder $script:exportDir -RootFolder $script:rootDir
 
-      $result = Get-Content (Join-Path $script:rootDir "deploymentSettings_QA.json") -Raw | ConvertFrom-Json
+      $result = Get-Content (Join-Path $script:rootDir "deploymentSettings_Test.json") -Raw | ConvertFrom-Json
       $result.EnvironmentVariables.Count | Should -Be 1
       $result.EnvironmentVariables[0].Value | Should -Be "keep-me"
       $result.ConnectionReferences.Count | Should -Be 1

@@ -1,10 +1,10 @@
 # =============================================================================
-# Pipeline: Release Power Platform Solutions (QA → Stage → Prod)
+# Pipeline: Release Power Platform Solutions (Test → Stage → Prod)
 # =============================================================================
 # Triggers automatically when the daily export pipeline completes.
 # Deploys managed solutions through three environments in sequence.
 #
-# QA deploys automatically. Stage and Prod require manual approval — configure
+# Test deploys automatically. Stage and Prod require manual approval — configure
 # approval checks on the corresponding ADO environments:
 #   - "Power Platform Stage" → add approval gate
 #   - "Power Platform Prod"  → add approval gate
@@ -12,7 +12,7 @@
 # Prerequisites:
 #   1. Power Platform Build Tools extension installed in the ADO org
 #   2. ADO Environments created:
-#      - "Power Platform QA"
+#      - "Power Platform Test"
 #      - "Power Platform Stage"  (with approval check)
 #      - "Power Platform Prod"   (with approval check)
 #   3. Variable groups per environment containing:
@@ -20,7 +20,7 @@
 #      - ClientId        : Service Principal Application (Client) ID
 #      - ClientSecret    : Service Principal Client Secret (mark as secret)
 #      - TenantId        : Azure AD Tenant ID
-#      Groups: PowerPlatform-QA, PowerPlatform-Stage, PowerPlatform-Prod
+#      Groups: PowerPlatform-Test, PowerPlatform-Stage, PowerPlatform-Prod
 #   4. The export-solutions pipeline publishes an artifact named
 #      "ManagedSolutions" containing build.json and *_version.zip files
 # =============================================================================
@@ -63,14 +63,14 @@ stages:
             displayName: "Set build name from export pipeline"
 
   # ===========================================================================
-  # QA — Deploys automatically when the export pipeline completes
+  # Test — Deploys automatically when the export pipeline completes
   # ===========================================================================
   - template: templates/deploy-environment.yml
     parameters:
-      stageName: QA
-      displayName: "Deploy to QA"
-      environmentName: "Power Platform QA"
-      variableGroup: "PowerPlatform-QA"
+      stageName: Test
+      displayName: "Deploy to Test"
+      environmentName: "Power Platform Test"
+      variableGroup: "PowerPlatform-Test"
       dependsOn: SetBuildName
       dryRun: ${{ parameters.dryRun }}
 
@@ -83,7 +83,7 @@ stages:
       displayName: "Deploy to Stage"
       environmentName: "Power Platform Stage"
       variableGroup: "PowerPlatform-Stage"
-      dependsOn: QA
+      dependsOn: Test
       dryRun: ${{ parameters.dryRun }}
 
   # ===========================================================================

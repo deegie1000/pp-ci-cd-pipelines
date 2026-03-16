@@ -6,7 +6,7 @@ This is the plain-English version. For full technical details see [README.md](./
 
 ## What do these pipelines do?
 
-They move Power Platform solutions (apps, flows, etc.) from development environments into production in a controlled, repeatable way. Think of them as an automated moving truck that packages everything in Dev, checks it, and delivers it to QA, then Stage, then Prod — with a stop for your approval before anything goes to production.
+They move Power Platform solutions (apps, flows, etc.) from development environments into production in a controlled, repeatable way. Think of them as an automated moving truck that packages everything in Dev, checks it, and delivers it to Test, then Stage, then Prod — with a stop for your approval before anything goes to production.
 
 ---
 
@@ -14,12 +14,8 @@ They move Power Platform solutions (apps, flows, etc.) from development environm
 
 | Pipeline | Runs | What it does |
 |---|---|---|
-| **Daily Export** | Automatically every night ~10 PM | Saves the latest Dev work to source control and kicks off the QA deployment |
-| **Release** | Automatically after Daily Export | Deploys to QA (automatic), then waits for approval to go to Stage and Prod |
-| **Export from Pre-Dev** | You run it manually | Pulls a single solution out of Pre-Dev and deploys it to Dev |
-| **Deploy Solution** | Automatically after Pre-Dev Export | Deploys that single solution into Dev |
-| **Export for New Dev** | You run it manually | Packages solutions from Dev to seed a brand-new Dev environment |
-| **Deploy to New Dev** | You run it manually | Takes that package and installs it into the new Dev environment |
+| **Daily Export** | Automatically every night ~10 PM | Saves the latest Dev work to source control and kicks off the Test deployment |
+| **Release** | Automatically after Daily Export | Deploys to Test (automatic), then waits for approval to go to Stage and Prod |
 
 ---
 
@@ -34,7 +30,7 @@ Daily Export runs — saves Dev solutions to source control
     ↓
 Release pipeline starts automatically
     ↓
-Deploys to QA — no action needed from you
+Deploys to Test — no action needed from you
     ↓
 ⏸ Waits for your approval to deploy to Stage
     ↓
@@ -73,46 +69,6 @@ All pipelines can be triggered manually. The Daily Export also runs automaticall
 
 ---
 
-## Setting up a new Dev environment
-
-Use this when someone needs a fresh Power Platform environment that mirrors Dev (for example, a new team member or a temporary sandbox).
-
-**Step 1 — Export to New Dev**
-
-1. Create an export branch in the repo following the naming format: `export/{token}`
-   (e.g. `export/onboarding-alex`)
-2. Add a `build.json` file in the `exports/onboarding-alex/` folder listing the solutions you want — ask your developer to set this up if needed
-3. Go to **Pipelines** → **export-for-new-dev**
-4. Click **Run pipeline**
-5. In the **Export branch** field, enter the branch name you created (e.g. `export/onboarding-alex`)
-6. Click **Run** — the pipeline will export the solutions and publish a package
-
-**Step 2 — Deploy to New Dev**
-
-1. Go to **Pipelines** → **deploy-to-newdev**
-2. Click **Run pipeline**
-3. ADO will ask you to select which **export-for-new-dev** run to deploy — pick the one you just ran
-4. Click **Run**
-
-The solutions will be installed into the New Dev environment. Solutions marked as "unmanaged" in the configuration will be installed as unmanaged (editable), which is typical for a Dev environment.
-
-> **Note:** The `isUnmanaged` flag in `build.json` also controls how solutions are deployed through the standard release pipeline (QA → Stage → Prod). If a solution has `isUnmanaged: true`, the release pipeline will import it as an unmanaged solution instead of managed. This also works together with `isExisting: true` — if both are set, the pipeline reads the zip from `solutions/unmanaged/` instead of `solutions/managed/`.
-
----
-
-## Single solution quick-deploy (Pre-Dev → Dev)
-
-When a developer finishes work on a single solution in Pre-Dev and needs it deployed to Dev:
-
-1. Go to **Pipelines** → **Export Solution from Pre-Dev**
-2. Click **Run pipeline**
-3. Enter the **solution name** (the unique technical name, e.g. `MyApp`)
-4. Click **Run**
-
-The pipeline will export from Pre-Dev and automatically deploy to Dev. To then promote to QA, Stage, or Prod, use the **Release Ad-Hoc** pipeline.
-
----
-
 ## When something looks wrong
 
 **The pipeline ran but nothing was deployed**
@@ -137,10 +93,10 @@ The pipeline will export from Pre-Dev and automatically deploy to Dev. To then p
 | Term | What it means |
 |---|---|
 | **Solution** | A Power Platform "package" containing apps, flows, tables, etc. |
-| **Managed** | A solution installed in a way that can't be directly edited — used for QA, Stage, Prod |
+| **Managed** | A solution installed in a way that can't be directly edited — used for Test, Stage, Prod |
 | **Unmanaged** | A solution installed in a way that can be edited — used for Dev environments |
 | **Artifact** | The packaged files produced by an export pipeline, ready to be deployed |
 | **Variable group** | A named set of passwords/URLs stored securely in ADO — edited by your ADO admin |
 | **ADO Environment** | A named checkpoint in ADO where approval checks live |
 | **build.json** | A configuration file telling the pipeline which solutions to export/deploy and at what versions |
-| **Export branch** | A short-lived Git branch that holds a `build.json` for one export run. Daily export branches use `export/yyyy-MM-dd-{token}`; New Dev export branches use `export/{token}` (no date required) |
+| **Export branch** | A short-lived Git branch that holds a `build.json` for one export run. Uses naming pattern `export/yyyy-MM-dd-{token}` (e.g. `export/2026-02-15-sprint42`) |

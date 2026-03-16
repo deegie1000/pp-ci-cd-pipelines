@@ -9,8 +9,7 @@ This document contains the detailed code patterns, naming conventions, and imple
 | Pattern | Example | Used For |
 |---------|---------|----------|
 | `{SolutionName}_{version}.zip` | `CoreComponents_1.2.0.0.zip` | Versioned solution artifacts (daily export) |
-| `{SolutionName}.zip` | `MainApp.zip` | Unversioned solution artifacts (pre-dev export) |
-| `deploymentSettings_{Env}.json` | `deploymentSettings_QA.json` | Per-environment deployment settings |
+| `deploymentSettings_{Env}.json` | `deploymentSettings_Test.json` | Per-environment deployment settings |
 | `build.json` | `build.json` | Export/release configuration |
 | `export/{yyyy-MM-dd}-{token}` | `export/2026-02-15-sprint42` | Export branch names |
 | `exports/{yyyy-MM-dd-token}/` | `exports/2026-02-15-sprint42/` | Export configuration folder |
@@ -20,9 +19,9 @@ This document contains the detailed code patterns, naming conventions, and imple
 
 | Resource Type | Pattern | Example |
 |--------------|---------|---------|
-| Service connection | `PowerPlatform{Env}` | `PowerPlatformPreDev`, `PowerPlatformDev` |
-| Variable group | `PowerPlatform-{Env}` | `PowerPlatform-QA`, `PowerPlatform-Prod` |
-| ADO environment | `Power Platform {Env}` | `Power Platform QA`, `Power Platform Prod` |
+| Service connection | `PowerPlatform{Env}` | `PowerPlatformDev`, `PowerPlatformTest` |
+| Variable group | `PowerPlatform-{Env}` | `PowerPlatform-Test`, `PowerPlatform-Prod` |
+| ADO environment | `Power Platform {Env}` | `Power Platform Test`, `Power Platform Prod` |
 | Pipeline name | lowercase with hyphens | `export-solutions`, `release-solutions` |
 
 ## Authentication Patterns
@@ -33,12 +32,12 @@ Used by release and deploy pipelines for all deployment stages.
 
 ```yaml
 stages:
-  - stage: QA
+  - stage: Test
     variables:
-      - group: PowerPlatform-QA
+      - group: PowerPlatform-Test
     jobs:
       - deployment: Deploy
-        environment: "Power Platform QA"
+        environment: "Power Platform Test"
         strategy:
           runOnce:
             deploy:
@@ -66,20 +65,20 @@ stages:
 
 ### Pattern: Service Connection (ADO Tasks)
 
-Used by export pipelines for Power Platform Build Tools tasks.
+Used by the daily export pipeline for Power Platform Build Tools tasks.
 
 ```yaml
 variables:
-  - name: PreDevServiceConnection
-    value: "PowerPlatformPreDev"
+  - name: PowerPlatformServiceConnection
+    value: "PowerPlatformDev"
 
 steps:
   - task: PowerPlatformExportSolution@2
     inputs:
       authenticationType: PowerPlatformSPN
-      PowerPlatformSPN: $(PreDevServiceConnection)
-      SolutionName: ${{ parameters.solutionName }}
-      SolutionOutputFile: $(Build.SourcesDirectory)/solutions/unmanaged/${{ parameters.solutionName }}.zip
+      PowerPlatformSPN: $(PowerPlatformServiceConnection)
+      SolutionName: MySolution
+      SolutionOutputFile: $(Build.SourcesDirectory)/solutions/unmanaged/MySolution.zip
       Managed: false
       AsyncOperation: true
       MaxAsyncWaitTime: 60
@@ -447,15 +446,15 @@ All reusable templates follow this parameter convention:
 
 ```yaml
 parameters:
-  - name: stageName         # Short name: "QA", "Stage", "Prod"
+  - name: stageName         # Short name: "Test", "Stage", "Prod"
     type: string
-  - name: displayName       # Human-readable: "Deploy to QA"
+  - name: displayName       # Human-readable: "Deploy to Test"
     type: string
-  - name: environmentName   # ADO environment: "Power Platform QA"
+  - name: environmentName   # ADO environment: "Power Platform Test"
     type: string
-  - name: variableGroup     # Credential group: "PowerPlatform-QA"
+  - name: variableGroup     # Credential group: "PowerPlatform-Test"
     type: string
-  - name: dependsOn         # Previous stage: "Dev", "QA", etc.
+  - name: dependsOn         # Previous stage: "Dev", "Test", etc.
     type: string
     default: ""
 

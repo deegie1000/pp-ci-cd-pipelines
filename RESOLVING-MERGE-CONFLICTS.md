@@ -165,7 +165,7 @@ Delete the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) and keep only the 
 
 - **Create your export branch from an up-to-date `main`.** Before branching, always pull the latest main (see [CREATING-EXPORT-BRANCH.md](./CREATING-EXPORT-BRANCH.md#step-3-get-the-latest-code-from-main)).
 - **Don't let export branches sit for days.** The longer a branch lives, the more `main` diverges from it.
-- **Merge export PRs promptly.** After the pipeline creates the PR and QA/Stage/Prod are approved, merge it quickly to keep `main` clean.
+- **Merge export PRs promptly.** After the pipeline creates the PR and Test/Stage/Prod are approved, merge it quickly to keep `main` clean.
 
 ---
 

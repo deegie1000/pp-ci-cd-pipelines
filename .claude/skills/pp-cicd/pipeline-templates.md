@@ -134,10 +134,10 @@ stages:
 
   - template: templates/deploy-environment.yml
     parameters:
-      stageName: "{env_1_short}"             # e.g., "QA"
+      stageName: "{env_1_short}"             # e.g., "Test"
       displayName: "Deploy to {env_1}"
-      environmentName: "{ado_env_1}"         # e.g., "Power Platform QA"
-      variableGroup: "{var_group_1}"         # e.g., "PowerPlatform-QA"
+      environmentName: "{ado_env_1}"         # e.g., "Power Platform Test"
+      variableGroup: "{var_group_1}"         # e.g., "PowerPlatform-Test"
       dependsOn: ""                          # Empty = no dependency (first stage)
 
   - template: templates/deploy-environment.yml
@@ -146,7 +146,7 @@ stages:
       displayName: "Deploy to {env_2}"
       environmentName: "{ado_env_2}"
       variableGroup: "{var_group_2}"
-      dependsOn: "{env_1_short}"             # e.g., "QA"
+      dependsOn: "{env_1_short}"             # e.g., "Test"
 
   # ... repeat for each environment
 ```
@@ -244,174 +244,7 @@ stages:
 
 ---
 
-## 4. Export Solution from Pre-Dev (`export-solution-predev.yml`)
-
-### Structure
-
-```yaml
-# Header comment block
-
-trigger: none
-
-parameters:
-  - name: solutionName
-    displayName: "Solution unique name (as it appears in Power Platform)"
-    type: string
-
-variables:
-  - name: PreDevServiceConnection
-    value: "{predev_service_connection}"    # e.g., "PowerPlatformPreDev"
-
-pool:
-  vmImage: "windows-latest"
-
-steps:
-  # 1. Checkout with persistCredentials (needed for push)
-  - checkout: self
-    persistCredentials: true
-    fetchDepth: 0
-
-  # 2. Install pac CLI
-  - pwsh: dotnet tool install --global Microsoft.PowerApps.CLI.Tool
-
-  # 3. Create output directories
-  - pwsh: |
-      # Ensure solutions/{unmanaged,unpacked,managed} exist
-
-  # 4. Authenticate pac CLI with Pre-Dev environment
-  # See patterns.md: "pac CLI with Variable Group" pattern
-
-  # 5. Export unmanaged solution
-  - pwsh: |
-      pac solution export --name ${{ parameters.solutionName }} --path ... --overwrite
-    inputs:
-      authenticationType: PowerPlatformSPN
-      PowerPlatformSPN: $(PreDevServiceConnection)
-      SolutionName: ${{ parameters.solutionName }}
-      SolutionOutputFile: $(Build.SourcesDirectory)/solutions/unmanaged/${{ parameters.solutionName }}.zip
-      Managed: false
-      AsyncOperation: true
-      MaxAsyncWaitTime: 60
-
-  # 6. Clean unpack
-  - pwsh: |
-      # Delete existing unpacked folder if present
-      pac solution unpack --zipfile ... --folder ... --allowDelete true --allowWrite true
-
-  # 7. Export managed solution
-  - pwsh: |
-      pac solution export --name ${{ parameters.solutionName }} --path ... --managed --overwrite
-
-  # 8. Commit and push
-  - pwsh: |
-      git config user.email "pipeline@dev.azure.com"
-      git config user.name "Azure DevOps Pipeline"
-      git add solutions/
-      # Check for changes, commit, push
-
-  # 9. Create PR to main (auto-complete, squash merge, delete source branch)
-
-  # 10. Stage artifacts (managed zip + deploymentSettings_Dev.json)
-  - pwsh: |
-      # Copy managed zip to staging
-      # Copy deploymentSettings_Dev.json from deploymentSettings/preDev/ if exists
-
-  # 11. Publish artifact
-  - task: PublishPipelineArtifact@1
-    inputs:
-      targetPath: $(Build.ArtifactStagingDirectory)
-      artifact: ManagedSolution
-```
-
-### Key Generation Rules
-
-- Uses pac CLI for all operations (no ADO Power Platform tasks needed)
-- Commits to a new `export/predev/{timestamp}` branch, creates PR to main
-- Artifact name is `ManagedSolution` (singular — single solution)
-- Only stages `deploymentSettings_Dev.json` (pre-dev deploys to Dev only)
-
----
-
-## 5. Deploy Solution (`deploy-solution.yml`)
-
-### Structure
-
-```yaml
-# Header comment block
-
-trigger: none
-
-resources:
-  pipelines:
-    - pipeline: exportSolution
-      source: "{predev_export_pipeline_name}"   # e.g., "Export Solution from Pre-Dev"
-      trigger:
-        branches:
-          include:
-            - main
-
-parameters:
-  - name: solutionName
-    displayName: "Solution name (required for manual runs, ignored for auto-triggered)"
-    type: string
-    default: ""
-  - name: dryRun
-    displayName: "Dry run (validate only — no imports)"
-    type: boolean
-    default: false
-
-pool:
-  vmImage: "windows-latest"
-
-stages:
-  # Single stage: Dev only. Handles auto-trigger + manual.
-  # For QA/Stage/Prod promotion, use release-adhoc pipeline.
-  - stage: Dev
-    displayName: "Deploy to Dev"
-    variables:
-      - group: PowerPlatform-Dev
-    jobs:
-      - deployment: Deploy
-        displayName: "Deploy solution to Dev"
-        environment: "Power Platform Dev"
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                # 1. Checkout (for manual runs + deployment settings)
-                - checkout: self
-
-                # 2. Download artifact (auto-triggered only, graceful skip on manual)
-                - download: exportSolution
-                  artifact: ManagedSolution
-                  continueOnError: true
-
-                # 3. Authenticate pac CLI
-
-                # 4. Resolve solution path
-                #    Auto: find zip in artifact
-                #    Manual: use repo (solutions/managed/{name}.zip)
-
-                # 5. Check for deploymentSettings_Dev.json
-                #    Auto: in artifact folder
-                #    Manual: in deploymentSettings/preDev/
-
-                # 6. Import solution (pac solution import)
-
-                # 7. Upsert config data (if build.json has configData in artifact)
-                #    - Read build.json from artifact (auto-triggered only)
-                #    - Run scripts/Sync-ConfigData.ps1 -Mode Upsert
-```
-
-### Key Generation Rules
-
-- Single stage (Dev only) — no downstream stages, no artifact re-publishing
-- Handles both auto-triggered (artifact download) and manual (repo path) runs
-- Deployment settings key is always `Dev` for this pipeline
-
----
-
-## 6. README Generation Template
+## 4. README Generation Template
 
 ### Sections to Generate
 
@@ -431,7 +264,7 @@ stages:
    - Artifact description (if applicable)
 6. **Pipeline Flow Diagrams**: ASCII art diagrams:
    - Main flow (export → release) with stage boxes
-   - On-demand flow (pre-dev → deploy) with stage boxes
+   - Ad-hoc flow (release-adhoc → any environment) with stage boxes
    - Architecture overview (both tracks side-by-side with approval gates)
 7. **build.json Configuration**: Schema example (with configData if enabled), solutions field reference table, config data field reference table, version rules, caching note
 8. **Deployment Settings** (if enabled): How it works, merge behavior, example, rules
@@ -456,7 +289,7 @@ Use box-drawing characters for ASCII diagrams:
 Show approval gates as:
 ```
 ┌─────┐  ┌─────┐  ┌─────┐
-│ QA  │─►│ Stg │─►│Prod │
+│Test │─►│ Stg │─►│Prod │
 │auto │  │gate │  │gate │
 └─────┘  └─────┘  └─────┘
 ```

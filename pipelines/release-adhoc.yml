@@ -5,7 +5,7 @@
 # then specify the target ADO Environment and variable group to deploy into.
 #
 # Use this pipeline to deploy to environments outside the standard
-# QA → Stage → Prod release chain (e.g., sandbox, UAT, hotfix).
+# Test → Stage → Prod release chain (e.g., sandbox, UAT, hotfix).
 #
 # Prerequisites:
 #   1. The ADO Environment named below must exist in your ADO project

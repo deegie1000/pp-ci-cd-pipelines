@@ -2,7 +2,7 @@
 
 This guide walks you through the **Daily Export + Release** workflow from scratch — creating the export branch, adding the required files, and pushing so the pipeline can pick it up. No prior Git or VS Code experience needed.
 
-**What this covers:** The [Daily Export Solutions](./README.md#1-daily-export-solutions-pipelinesexport-solutionsyml) pipeline exports your solutions from Dev, then the [Release Solutions](./README.md#2-release-solutions-pipelinesrelease-solutionsyml) pipeline automatically deploys them through QA → Stage → Prod. Your job is to create the branch and files — the pipelines handle the rest.
+**What this covers:** The [Daily Export Solutions](./README.md#1-daily-export-solutions-pipelinesexport-solutionsyml) pipeline exports your solutions from Dev, then the [Release Solutions](./README.md#2-release-solutions-pipelinesrelease-solutionsyml) pipeline automatically deploys them through Test → Stage → Prod. Your job is to create the branch and files — the pipelines handle the rest.
 
 > **Already know Git?** Skip ahead to [Step 3: Create the Branch](#step-3-create-the-branch).
 
@@ -179,11 +179,11 @@ exports/2026-02-28-quarterly-release/
 
 ## Step 7: Create Deployment Settings Files (Optional)
 
-Deployment settings files let you configure environment variables and connection references differently per environment (QA, Stage, Prod). You only need these if your solution uses connection references or environment variables that differ between environments.
+Deployment settings files let you configure environment variables and connection references differently per environment (Test, Stage, Prod). You only need these if your solution uses connection references or environment variables that differ between environments.
 
 If you need them, create one or more of these files inside your export folder:
 
-- `deploymentSettings_QA.json`
+- `deploymentSettings_Test.json`
 - `deploymentSettings_Stage.json`
 - `deploymentSettings_Prod.json`
 
@@ -196,7 +196,7 @@ If you need them, create one or more of these files inside your export folder:
 }
 ```
 
-You can fill in the values later. See [`exports/sample/deploymentSettings_QA.json`](./exports/sample/deploymentSettings_QA.json) for the full format, and [Deployment Settings](./README.md#deployment-settings) in the README for documentation.
+You can fill in the values later. See [`exports/sample/deploymentSettings_Test.json`](./exports/sample/deploymentSettings_Test.json) for the full format, and [Deployment Settings](./README.md#deployment-settings) in the README for documentation.
 
 > You must also set `"includeDeploymentSettings": true` on the relevant solution in `build.json` for these files to be used during deployment.
 
@@ -235,7 +235,7 @@ Your branch is now visible in Azure DevOps.
 Once you push your branch, the pipeline can run. Here's the full sequence:
 
 ### Option A: Wait for the Automatic Run
-The **Daily Export Solutions** pipeline runs automatically at **10 PM ET** every night. It will detect your branch, export the solutions from Dev, and then automatically trigger the **Release Solutions** pipeline to deploy QA → Stage → Prod.
+The **Daily Export Solutions** pipeline runs automatically at **10 PM ET** every night. It will detect your branch, export the solutions from Dev, and then automatically trigger the **Release Solutions** pipeline to deploy Test → Stage → Prod.
 
 ### Option B: Trigger Manually (Don't Want to Wait)
 
@@ -257,7 +257,7 @@ When done, your folder should look like this:
 exports/
 └── 2026-02-28-quarterly-release/
     ├── build.json                      ← required
-    ├── deploymentSettings_QA.json      ← optional
+    ├── deploymentSettings_Test.json      ← optional
     ├── deploymentSettings_Stage.json   ← optional
     └── deploymentSettings_Prod.json    ← optional
 ```

@@ -16,8 +16,8 @@ Before generating anything, ask the user the following questions. Use the AskUse
 ### Required Information
 
 **Environments:** Which Power Platform environments will you deploy to? The arguments `$ARGUMENTS` may already specify these (e.g., `Dev QA Stage Prod`). If not provided, ask. Common patterns:
-- `Dev QA Stage Prod` (standard 4-stage)
-- `Dev QA Prod` (no staging)
+- `Dev Test Stage Prod` (standard 4-stage)
+- `Dev Test Prod` (no staging)
 - `Dev Test Prod` (simplified)
 - Custom names
 
@@ -28,13 +28,11 @@ Before generating anything, ask the user the following questions. Use the AskUse
 **Features to include (ask as multi-select):**
 1. **Scheduled daily export** — Nightly export from Dev, validate versions, PR to main
 2. **Multi-solution release pipeline** — Deploy multiple solutions from build.json through environments
-3. **On-demand single-solution export** — Export from a "Pre-Dev" or sandbox environment
-4. **Dev-only single-solution deploy** — Deploy a single solution from Pre-Dev into the Dev environment
-5. **Deployment settings** — Environment-specific connection references and environment variables
-6. **Post-export version management** — Auto-bump solution versions in Dev after export
-7. **Cloud flow activation** — Activate cloud flows after deployment (via Dataverse API)
-8. **Patch solution support** — Detect and handle solution patches (CloneAsPatch)
-9. **Configuration data migration** — Extract reference/lookup data from Dev (OData) and upsert into target environments using stable GUIDs
+3. **Deployment settings** — Environment-specific connection references and environment variables
+4. **Post-export version management** — Auto-bump solution versions in Dev after export
+5. **Cloud flow activation** — Activate cloud flows after deployment (via Dataverse API)
+6. **Patch solution support** — Detect and handle solution patches (CloneAsPatch)
+7. **Configuration data migration** — Extract reference/lookup data from Dev (OData) and upsert into target environments using stable GUIDs
 
 **Naming conventions (offer defaults, let user override):**
 - Service connection prefix: `PowerPlatform` (e.g., `PowerPlatformDev`)
@@ -98,22 +96,9 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
    - Cloud flow activation (if enabled): acquires OAuth token, activates via Dataverse API, warns on failure
    - Config data upsert (if enabled): runs Sync-ConfigData.ps1 in Upsert mode after solution imports
 
-4. **`pipelines/export-solution-predev.yml`** (if on-demand export enabled) — Single solution export. Key decisions:
-   - Manual trigger with `solutionName` parameter
-   - Auth: pac CLI with variable group (no ADO tasks, no service connection needed)
-   - Uses pac CLI for export, unpack, and auth (`pac solution export`, `pac solution unpack`)
-   - Commits to `export/predev/{timestamp}` branch, creates PR to main, publishes `ManagedSolution` artifact, triggers deploy pipeline
-
-5. **`pipelines/deploy-solution.yml`** (if on-demand export enabled) — Dev-only single-solution deploy. Key decisions:
-   - Triggered by pre-dev export pipeline completion
-   - Single stage (Dev): handles auto-trigger + manual, imports solution into Dev
-   - Config data upsert (if enabled): runs after solution import
-   - Auth: `PowerPlatform-Dev` variable group only
-   - No downstream stages — for QA/Stage/Prod promotion, use `release-adhoc` pipeline
-
 ### 3c. Templates
 
-6. **`pipelines/templates/deploy-environment.yml`** (if multi-solution release enabled) — Reusable template for multi-solution deployment. Parameters: `stageName`, `displayName`, `environmentName`, `variableGroup`, `dependsOn`.
+4. **`pipelines/templates/deploy-environment.yml`** (if multi-solution release enabled) — Reusable template for multi-solution deployment. Parameters: `stageName`, `displayName`, `environmentName`, `variableGroup`, `dependsOn`.
 
 ### 3d. Scripts
 
@@ -145,7 +130,6 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
     - `tests/Build-Json-Validation.Tests.ps1` — Validates build.json schema (required fields, defaults, constraints)
     - `tests/Merge-DeploymentSettings.Tests.ps1` (if deployment settings enabled) — Tests merge algorithm
     - `tests/Cloud-Flow-Detection.Tests.ps1` (if cloud flows enabled) — Tests flow detection logic
-    - `tests/Deploy-Dev-Settings.Tests.ps1` (if both deploy + deployment settings enabled) — Tests settings resolution
     - `tests/Config-Data-Validation.Tests.ps1` (if config data migration enabled) — Tests configData schema validation and data file serialization
 
 ### 3g. Documentation
@@ -188,16 +172,14 @@ After generating all files, provide:
 These are the **hardened design decisions** from production use. Do not deviate unless the user explicitly requests changes.
 
 ### Authentication Model
-- **Service connections**: Used only for ADO task-based operations (Pre-Dev export, daily export PP tasks)
+- **Service connections**: Used only for ADO task-based operations (daily export PP tasks)
 - **Variable groups**: Used for pac CLI auth in all deployment stages. One group per environment: `{Prefix}{Env}` with keys: `EnvironmentUrl`, `ClientId`, `ClientSecret` (secret), `TenantId`
 - **Secret pipeline variables**: Used only for daily export pipeline's pac CLI auth (alternative to variable group)
 
 ### Artifact Flow
 - Daily export publishes `ManagedSolutions` artifact → consumed by release pipeline
   - Contains: build.json, `{name}_{version}.zip` files, `deploymentSettings_*.json`, `configData/*.json`
-- Pre-dev export publishes `ManagedSolution` artifact → consumed by deploy pipeline (Dev only)
-- Deploy pipeline imports into Dev only; no downstream artifact re-publishing
-- Artifact always contains solution zips named `{name}_{version}.zip` (daily) or `{name}.zip` (pre-dev)
+- Artifact always contains solution zips named `{name}_{version}.zip`
 
 ### Deployment Settings Strategy
 - Root `deploymentSettings/` folder = accumulated source of truth
