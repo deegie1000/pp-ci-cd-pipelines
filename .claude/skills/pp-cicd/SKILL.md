@@ -221,8 +221,14 @@ These are the **hardened design decisions** from production use. Do not deviate 
 - Conditional `dependsOn`: empty array for first stage, previous stage name for others
 
 ### Import Options
-- Always use: `--stage-and-upgrade`, `--skip-lower-version`, `--activate-plugins`
+- Always use: `--activate-plugins`, `--async`, `--max-async-wait-time 60`
+- Default upgrade strategy (managed, non-rollback, non-unmanaged): `--stage-and-upgrade --skip-lower-version`
 - Conditionally use: `--settings-file` (only when deployment settings enabled and file exists)
+- Power Pages override: if `powerPagesConfiguration.deployMode` is set, it controls the import strategy:
+  - `UPGRADE` → `--stage-and-upgrade --skip-lower-version`
+  - `UPDATE` → no staging flags (plain import)
+  - `STAGE_FOR_UPGRADE` → `--import-as-holding`
+  - `powerPagesConfiguration.addAllExistingSiteComponentsForSites` → `--add-existing-website-components <value>`
 - Solution import via `pac solution import` (pac CLI, not ADO tasks) for deployment stages
 
 ### PR Automation (Daily Export)

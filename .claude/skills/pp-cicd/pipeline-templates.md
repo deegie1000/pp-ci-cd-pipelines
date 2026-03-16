@@ -214,7 +214,12 @@ stages:
                 # 7. Acquire OAuth token (if cloud flow activation enabled)
                 # 8. Deploy each solution in order:
                 #    - Skip if already at target version
-                #    - Import with --stage-and-upgrade --skip-lower-version --activate-plugins
+                #    - Read powerPagesConfiguration (if set, overrides import strategy)
+                #    - Default managed upgrade: --stage-and-upgrade --skip-lower-version --activate-plugins
+                #    - Power Pages deployMode=UPGRADE: --stage-and-upgrade --skip-lower-version
+                #    - Power Pages deployMode=UPDATE: plain import (no staging flags)
+                #    - Power Pages deployMode=STAGE_FOR_UPGRADE: --import-as-holding
+                #    - Power Pages addAllExistingSiteComponentsForSites: --add-existing-website-components <value>
                 #    - Apply --settings-file if includeDeploymentSettings
                 #    - Activate cloud flows if includesCloudFlows
                 # 9. Print summary (deployed/skipped/failed counts)
@@ -240,6 +245,7 @@ stages:
 - Deployment settings file naming: `deploymentSettings_${{ parameters.stageName }}.json`
 - Cloud flow activation is optional — only generate that section if feature enabled
 - Config data upsert is optional — only generate if config data migration enabled
+- Power Pages import strategy: read `powerPagesConfiguration` per solution; `deployMode` (UPGRADE/UPDATE/STAGE_FOR_UPGRADE) overrides the default `--stage-and-upgrade` logic; `addAllExistingSiteComponentsForSites` adds `--add-existing-website-components <value>`; has no effect when `isUnmanaged: true`
 - The entire deploy loop is one PowerShell step (for variable sharing)
 
 ---

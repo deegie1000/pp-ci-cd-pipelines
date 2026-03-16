@@ -274,6 +274,21 @@ stages:
                         Write-Host "  isUnmanaged = true — importing as unmanaged; staged upgrade will NOT be used."
                       }
 
+                      # Read powerPagesConfiguration from build.json solution entry
+                      $ppConfig = $null
+                      if ($solution.PSObject.Properties['powerPagesConfiguration']) {
+                        $ppConfig = $solution.powerPagesConfiguration
+                        $ppDeployMode = ""
+                        if ($ppConfig.PSObject.Properties['deployMode'] -and $ppConfig.deployMode) {
+                          $ppDeployMode = $ppConfig.deployMode.ToUpper()
+                        }
+                        Write-Host "  powerPagesConfiguration detected:"
+                        Write-Host "    deployMode = $ppDeployMode"
+                        if ($ppConfig.PSObject.Properties['addAllExistingSiteComponentsForSites'] -and $ppConfig.addAllExistingSiteComponentsForSites) {
+                          Write-Host "    addAllExistingSiteComponentsForSites = $($ppConfig.addAllExistingSiteComponentsForSites)"
+                        }
+                      }
+
                       # Check if already installed at this version
                       $isUpgrade = $false
                       if ($installed.ContainsKey($name)) {
@@ -308,12 +323,15 @@ stages:
                       # Import solution (managed or unmanaged based on isUnmanaged flag)
                       if ($isUnmanaged) {
                         Write-Host "  Importing unmanaged solution (isUnmanaged=true)..."
+                      } elseif ($ppConfig) {
+                        Write-Host "  Importing managed solution (Power Pages, deployMode=$ppDeployMode)..."
                       } else {
                         Write-Host "  Importing managed solution..."
                       }
 
-                      # Use --stage-and-upgrade only for managed upgrades.
+                      # Build import arguments.
                       # Unmanaged imports and rollbacks skip staged upgrade entirely.
+                      # powerPagesConfiguration.deployMode overrides the default upgrade strategy for managed solutions.
                       $importArgs = @(
                         "solution", "import",
                         "--path", $zipPath,
@@ -321,7 +339,34 @@ stages:
                         "--async",
                         "--max-async-wait-time", "60"
                       )
-                      if ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
+
+                      if ($ppConfig -and $ppDeployMode -and -not $isUnmanaged) {
+                        switch ($ppDeployMode) {
+                          "UPGRADE" {
+                            Write-Host "  Power Pages deployMode=UPGRADE — using --stage-and-upgrade"
+                            $importArgs += "--stage-and-upgrade"
+                            $importArgs += "--skip-lower-version"
+                          }
+                          "UPDATE" {
+                            Write-Host "  Power Pages deployMode=UPDATE — standard import (no staged upgrade)"
+                          }
+                          "STAGE_FOR_UPGRADE" {
+                            Write-Host "  Power Pages deployMode=STAGE_FOR_UPGRADE — using --import-as-holding"
+                            $importArgs += "--import-as-holding"
+                          }
+                          default {
+                            Write-Host "##vso[task.logissue type=warning]Unknown powerPagesConfiguration.deployMode '$ppDeployMode' — falling back to default import strategy"
+                            if ($isUpgrade -and -not $isRollback) {
+                              $importArgs += "--stage-and-upgrade"
+                              $importArgs += "--skip-lower-version"
+                            }
+                          }
+                        }
+                        if ($ppConfig.PSObject.Properties['addAllExistingSiteComponentsForSites'] -and $ppConfig.addAllExistingSiteComponentsForSites) {
+                          $importArgs += "--add-existing-website-components"
+                          $importArgs += $ppConfig.addAllExistingSiteComponentsForSites
+                        }
+                      } elseif ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
                       }

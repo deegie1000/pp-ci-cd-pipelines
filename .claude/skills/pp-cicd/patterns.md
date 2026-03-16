@@ -278,10 +278,27 @@ foreach ($solution in $solutions) {
 $importArgs = @(
   "solution", "import",
   "--path", $zipPath,
-  "--stage-and-upgrade",
-  "--skip-lower-version",
-  "--activate-plugins"
+  "--activate-plugins",
+  "--async",
+  "--max-async-wait-time", "60"
 )
+
+# Power Pages deployMode overrides the default upgrade strategy for managed solutions.
+# isUnmanaged and isRollback skip staged upgrade entirely.
+if ($ppConfig -and $ppDeployMode -and -not $isUnmanaged) {
+  switch ($ppDeployMode) {
+    "UPGRADE"         { $importArgs += "--stage-and-upgrade"; $importArgs += "--skip-lower-version" }
+    "UPDATE"          { } # plain import — no staging flags
+    "STAGE_FOR_UPGRADE" { $importArgs += "--import-as-holding" }
+  }
+  if ($ppConfig.addAllExistingSiteComponentsForSites) {
+    $importArgs += "--add-existing-website-components"
+    $importArgs += $ppConfig.addAllExistingSiteComponentsForSites
+  }
+} elseif ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
+  $importArgs += "--stage-and-upgrade"
+  $importArgs += "--skip-lower-version"
+}
 
 if ($includeSettings -and (Test-Path $settingsFile)) {
   $importArgs += @("--settings-file", $settingsFile)

@@ -22,6 +22,16 @@
       "postExportVersion": "2.2.0.0",
       "createNewPatch": false,
       "isRollback": false
+    },
+    {
+      "name": "PowerPagesPortal",
+      "version": "1.0.0.0",
+      "postExportVersion": "1.0.1.0",
+      "createNewPatch": false,
+      "powerPagesConfiguration": {
+        "addAllExistingSiteComponentsForSites": "my-portal-site",
+        "deployMode": "UPGRADE"
+      }
     }
   ],
   "configData": [
