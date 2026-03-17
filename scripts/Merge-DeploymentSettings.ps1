@@ -101,7 +101,7 @@ foreach ($exportFile in $exportFiles) {
   if (Test-Path $rootFile) {
     $rootSettings = Get-Content $rootFile -Raw | ConvertFrom-Json
   } else {
-    Write-Host "  Root file does not exist — creating new: $($exportFile.Name)"
+    Write-Host "  Root file does not exist - creating new: $($exportFile.Name)"
     $rootSettings = [PSCustomObject]@{
       EnvironmentVariables = @()
       ConnectionReferences = @()

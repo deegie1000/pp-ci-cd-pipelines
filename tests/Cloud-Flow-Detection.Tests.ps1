@@ -1,59 +1,61 @@
 Describe "Cloud flow detection" {
 
-  # -----------------------------------------------------------------------
-  # Helper: mirrors the detection logic used by the export pipeline.
-  # Given an unpacked solution root folder, returns $true if cloud flows
-  # (.json files in Workflows/) are found.
-  # -----------------------------------------------------------------------
-  function Test-HasCloudFlows {
-    param([string]$UnpackedDir)
-    $workflowsDir = Join-Path $UnpackedDir "Workflows"
-    if (-not (Test-Path $workflowsDir)) { return $false }
-    $jsonFiles = Get-ChildItem -Path $workflowsDir -Filter "*.json" -File -ErrorAction SilentlyContinue
-    return ($null -ne $jsonFiles -and $jsonFiles.Count -gt 0)
-  }
-
-  # -----------------------------------------------------------------------
-  # Helper: creates a temp unpacked solution structure and returns the path.
-  # -----------------------------------------------------------------------
-  function New-UnpackedSolution {
-    param(
-      [string]$Name,
-      [switch]$WithWorkflowsDir,
-      [string[]]$CloudFlowFiles,
-      [string[]]$ClassicWorkflowFiles
-    )
-    $dir = Join-Path ([System.IO.Path]::GetTempPath()) "solution_$([guid]::NewGuid().ToString('N'))"
-    $solutionDir = Join-Path $dir $Name
-    New-Item -ItemType Directory -Path $solutionDir -Force | Out-Null
-
-    if ($WithWorkflowsDir -or $CloudFlowFiles -or $ClassicWorkflowFiles) {
-      $wfDir = Join-Path $solutionDir "Workflows"
-      New-Item -ItemType Directory -Path $wfDir -Force | Out-Null
-
-      foreach ($f in $CloudFlowFiles) {
-        # Cloud flows are .json files with Logic Apps schema content
-        $content = @{
-          definition = @{
-            triggers = @{}
-            actions = @{}
-          }
-        } | ConvertTo-Json -Depth 5
-        Set-Content -Path (Join-Path $wfDir $f) -Value $content -Encoding UTF8
-      }
-
-      foreach ($f in $ClassicWorkflowFiles) {
-        # Classic workflows are .xaml files
-        Set-Content -Path (Join-Path $wfDir $f) -Value "<Activity />" -Encoding UTF8
-      }
+  BeforeAll {
+    # -----------------------------------------------------------------------
+    # Helper: mirrors the detection logic used by the export pipeline.
+    # Given an unpacked solution root folder, returns $true if cloud flows
+    # (.json files in Workflows/) are found.
+    # -----------------------------------------------------------------------
+    function Test-HasCloudFlows {
+      param([string]$UnpackedDir)
+      $workflowsDir = Join-Path $UnpackedDir "Workflows"
+      if (-not (Test-Path $workflowsDir)) { return $false }
+      $jsonFiles = Get-ChildItem -Path $workflowsDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+      return ($null -ne $jsonFiles -and $jsonFiles.Count -gt 0)
     }
 
-    return $solutionDir
+    # -----------------------------------------------------------------------
+    # Helper: creates a temp unpacked solution structure and returns the path.
+    # -----------------------------------------------------------------------
+    function New-UnpackedSolution {
+      param(
+        [string]$Name,
+        [switch]$WithWorkflowsDir,
+        [string[]]$CloudFlowFiles,
+        [string[]]$ClassicWorkflowFiles
+      )
+      $dir = Join-Path ([System.IO.Path]::GetTempPath()) "solution_$([guid]::NewGuid().ToString('N'))"
+      $solutionDir = Join-Path $dir $Name
+      New-Item -ItemType Directory -Path $solutionDir -Force | Out-Null
+
+      if ($WithWorkflowsDir -or $CloudFlowFiles -or $ClassicWorkflowFiles) {
+        $wfDir = Join-Path $solutionDir "Workflows"
+        New-Item -ItemType Directory -Path $wfDir -Force | Out-Null
+
+        foreach ($f in $CloudFlowFiles) {
+          # Cloud flows are .json files with Logic Apps schema content
+          $content = @{
+            definition = @{
+              triggers = @{}
+              actions = @{}
+            }
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Path (Join-Path $wfDir $f) -Value $content -Encoding UTF8
+        }
+
+        foreach ($f in $ClassicWorkflowFiles) {
+          # Classic workflows are .xaml files
+          Set-Content -Path (Join-Path $wfDir $f) -Value "<Activity />" -Encoding UTF8
+        }
+      }
+
+      return $solutionDir
+    }
   }
 
   AfterEach {
     if ($script:solutionDir) {
-      $parent = Split-Path (Split-Path $script:solutionDir)
+      $parent = Split-Path $script:solutionDir
       Remove-Item -Path $parent -Recurse -Force -ErrorAction SilentlyContinue
     }
   }

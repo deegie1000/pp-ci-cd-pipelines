@@ -173,7 +173,7 @@ foreach ($siteName in $SiteNames) {
     $siteMembership = Invoke-ODataPagedQuery -Uri $siteMemberUrl -Headers $ApiHeaders
 
     if ($siteMembership.Count -gt 0) {
-        Write-Host "  Site already in solution — skipping."
+        Write-Host "  Site already in solution - skipping."
         $totalSkipped++
     } else {
         $addSiteBody = @{
@@ -274,7 +274,7 @@ $currentTableIds = @(Invoke-ODataPagedQuery -Uri $currentTableUrl -Headers $ApiH
 $newTableIds = @($currentTableIds | Where-Object { -not $existingTableSet.Contains($_) })
 
 if ($newTableIds.Count -eq 0) {
-    Write-Host "  No new table components found — no cleanup needed."
+    Write-Host "  No new table components found - no cleanup needed."
 } else {
     Write-Host "  Removing $($newTableIds.Count) inadvertently added table component(s)..."
     foreach ($tableId in $newTableIds) {

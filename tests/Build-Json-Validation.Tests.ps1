@@ -1,45 +1,47 @@
 Describe "build.json validation" {
 
-  # Helper: writes a build.json and returns the path
-  function New-BuildJson {
-    param([object]$Content)
-    $dir = Join-Path ([System.IO.Path]::GetTempPath()) "build_$([guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    $path = Join-Path $dir "build.json"
-    $Content | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
-    return $path
-  }
-
-  # Validation function under test — mirrors what the pipeline should enforce
-  function Test-BuildJson {
-    param([string]$Path)
-    $config = Get-Content $Path -Raw | ConvertFrom-Json
-    $solutions = @($config.solutions)
-
-    if (-not $solutions -or $solutions.Count -eq 0) {
-      throw "No solutions specified in build.json"
+  BeforeAll {
+    # Helper: writes a build.json and returns the path
+    function New-BuildJson {
+      param([object]$Content)
+      $dir = Join-Path ([System.IO.Path]::GetTempPath()) "build_$([guid]::NewGuid().ToString('N'))"
+      New-Item -ItemType Directory -Path $dir -Force | Out-Null
+      $path = Join-Path $dir "build.json"
+      $Content | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
+      return $path
     }
 
-    $settingsCount = 0
-    foreach ($s in $solutions) {
-      if (-not $s.name) { throw "Solution missing 'name' property" }
-      if (-not $s.version) { throw "Solution missing 'version' property" }
+    # Validation function under test — mirrors what the pipeline should enforce
+    function Test-BuildJson {
+      param([string]$Path)
+      $config = Get-Content $Path -Raw | ConvertFrom-Json
+      $solutions = @($config.solutions)
 
-      $hasSettings = $false
-      if ($s.PSObject.Properties["includeDeploymentSettings"]) {
-        $hasSettings = [bool]$s.includeDeploymentSettings
+      if (-not $solutions -or $solutions.Count -eq 0) {
+        throw "No solutions specified in build.json"
       }
-      if ($hasSettings) { $settingsCount++ }
-    }
 
-    if ($settingsCount -gt 1) {
-      throw "Only one solution may have includeDeploymentSettings set to true, but $settingsCount were found"
-    }
+      $settingsCount = 0
+      foreach ($s in $solutions) {
+        if (-not $s.name) { throw "Solution missing 'name' property" }
+        if (-not $s.version) { throw "Solution missing 'version' property" }
 
-    return @{
-      Solutions = $solutions
-      HasDeploymentSettings = ($settingsCount -eq 1)
-      SettingsCount = $settingsCount
+        $hasSettings = $false
+        if ($s.PSObject.Properties["includeDeploymentSettings"]) {
+          $hasSettings = [bool]$s.includeDeploymentSettings
+        }
+        if ($hasSettings) { $settingsCount++ }
+      }
+
+      if ($settingsCount -gt 1) {
+        throw "Only one solution may have includeDeploymentSettings set to true, but $settingsCount were found"
+      }
+
+      return @{
+        Solutions = $solutions
+        HasDeploymentSettings = ($settingsCount -eq 1)
+        SettingsCount = $settingsCount
+      }
     }
   }
 

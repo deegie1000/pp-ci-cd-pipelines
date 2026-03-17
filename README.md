@@ -532,7 +532,7 @@ Config data upsert runs **after** solution imports because the target tables mus
 
 ## Testing
 
-The repository includes [Pester](https://pester.dev) unit tests for the deployment settings logic. Tests are in the `tests/` folder.
+The repository includes [Pester](https://pester.dev) unit tests. Tests are in the `tests/` folder.
 
 **Running the tests:**
 
@@ -548,6 +548,7 @@ Invoke-Pester tests/ -Output Detailed
 
 | File | What it tests |
 |---|---|
+| `Add-PowerPagesSiteComponents.Tests.ps1` | Power Pages component sync: component type resolution, solution lookup, site-already-in-solution skip, site add, component diffing (new only), inadvertent table component cleanup, OData pagination, multiple sites |
 | `Merge-DeploymentSettings.Tests.ps1` | Merge logic: new items appended, existing items overwritten by export, multiple environment files processed independently, empty arrays preserved |
 | `Build-Json-Validation.Tests.ps1` | `build.json` validation: required fields, `includeDeploymentSettings` defaults to false, only one solution may have it set to true |
 | `Cloud-Flow-Detection.Tests.ps1` | Cloud flow detection: `.json` files in `Workflows/` detected, `.xaml`-only and empty directories return false, `includesCloudFlows` flag round-trip through `build.json` serialization |

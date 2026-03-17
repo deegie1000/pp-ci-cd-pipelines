@@ -1,50 +1,52 @@
 Describe "configData validation in build.json" {
 
-  # Helper: writes a build.json and returns the path
-  function New-BuildJson {
-    param([object]$Content)
-    $dir = Join-Path ([System.IO.Path]::GetTempPath()) "build_$([guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    $path = Join-Path $dir "build.json"
-    $Content | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
-    return $path
-  }
-
-  # Validation function under test — mirrors what the pipeline should enforce
-  function Test-ConfigData {
-    param([string]$Path)
-    $config = Get-Content $Path -Raw | ConvertFrom-Json
-
-    $result = @{
-      HasConfigData = $false
-      ConfigDataCount = 0
-      DataSets = @()
+  BeforeAll {
+    # Helper: writes a build.json and returns the path
+    function New-BuildJson {
+      param([object]$Content)
+      $dir = Join-Path ([System.IO.Path]::GetTempPath()) "build_$([guid]::NewGuid().ToString('N'))"
+      New-Item -ItemType Directory -Path $dir -Force | Out-Null
+      $path = Join-Path $dir "build.json"
+      $Content | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
+      return $path
     }
 
-    if (-not $config.PSObject.Properties["configData"] -or $config.configData.Count -eq 0) {
+    # Validation function under test — mirrors what the pipeline should enforce
+    function Test-ConfigData {
+      param([string]$Path)
+      $config = Get-Content $Path -Raw | ConvertFrom-Json
+
+      $result = @{
+        HasConfigData = $false
+        ConfigDataCount = 0
+        DataSets = @()
+      }
+
+      if (-not $config.PSObject.Properties["configData"] -or $config.configData.Count -eq 0) {
+        return $result
+      }
+
+      $configData = @($config.configData)
+      $result.HasConfigData = $true
+      $result.ConfigDataCount = $configData.Count
+
+      foreach ($ds in $configData) {
+        if (-not $ds.name) { throw "Config data entry missing 'name' property" }
+        if (-not $ds.entity) { throw "Config data entry '$($ds.name)' missing 'entity' property" }
+        if (-not $ds.primaryKey) { throw "Config data entry '$($ds.name)' missing 'primaryKey' property" }
+        if (-not $ds.select) { throw "Config data entry '$($ds.name)' missing 'select' property" }
+        if (-not $ds.dataFile) { throw "Config data entry '$($ds.name)' missing 'dataFile' property" }
+
+        $result.DataSets += @{
+          Name = $ds.name
+          Entity = $ds.entity
+          PrimaryKey = $ds.primaryKey
+          HasFilter = [bool]($ds.PSObject.Properties["filter"] -and $ds.filter)
+        }
+      }
+
       return $result
     }
-
-    $configData = @($config.configData)
-    $result.HasConfigData = $true
-    $result.ConfigDataCount = $configData.Count
-
-    foreach ($ds in $configData) {
-      if (-not $ds.name) { throw "Config data entry missing 'name' property" }
-      if (-not $ds.entity) { throw "Config data entry '$($ds.name)' missing 'entity' property" }
-      if (-not $ds.primaryKey) { throw "Config data entry '$($ds.name)' missing 'primaryKey' property" }
-      if (-not $ds.select) { throw "Config data entry '$($ds.name)' missing 'select' property" }
-      if (-not $ds.dataFile) { throw "Config data entry '$($ds.name)' missing 'dataFile' property" }
-
-      $result.DataSets += @{
-        Name = $ds.name
-        Entity = $ds.entity
-        PrimaryKey = $ds.primaryKey
-        HasFilter = [bool]($ds.PSObject.Properties["filter"] -and $ds.filter)
-      }
-    }
-
-    return $result
   }
 
   AfterEach {
@@ -255,9 +257,10 @@ Describe "Sync-ConfigData data file format" {
       )
 
       $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) "configdata_$([guid]::NewGuid().ToString('N')).json"
-      $records | ConvertTo-Json -Depth 10 | Set-Content -Path $tempFile -Encoding UTF8
+      ConvertTo-Json -InputObject $records -Depth 10 | Set-Content -Path $tempFile -Encoding UTF8
 
-      $loaded = @(Get-Content $tempFile -Raw | ConvertFrom-Json)
+      $raw = Get-Content $tempFile -Raw | ConvertFrom-Json
+      $loaded = @($raw)
       $loaded.Count | Should -Be 2
       $loaded[0].cr123_stateid | Should -Be "a1b2c3d4-0000-0000-0000-000000000001"
       $loaded[0].cr123_name | Should -Be "Alabama"
@@ -267,12 +270,11 @@ Describe "Sync-ConfigData data file format" {
     }
 
     It "handles empty data file (no records)" {
-      $records = @()
       $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) "configdata_$([guid]::NewGuid().ToString('N')).json"
-      # ConvertTo-Json with empty array produces "[]" only with explicit wrapping
       "[]" | Set-Content -Path $tempFile -Encoding UTF8
 
-      $loaded = @(Get-Content $tempFile -Raw | ConvertFrom-Json)
+      $raw = Get-Content $tempFile -Raw | ConvertFrom-Json
+      $loaded = if ($null -eq $raw) { @() } else { @($raw) }
       $loaded.Count | Should -Be 0
 
       Remove-Item $tempFile -Force -ErrorAction SilentlyContinue

@@ -1,7 +1,34 @@
 {
   "permissions": {
     "allow": [
-      "Read(//c/Users/FrankShin/.claude/projects/c--Users-FrankShin-source-repos-pp-ci-cd-pp-ci-cd-pipelines/memory/**)"
+      "Read(//c/Users/FrankShin/.claude/projects/c--Users-FrankShin-source-repos-pp-ci-cd-pp-ci-cd-pipelines/memory/**)",
+      "Bash(powershell -Command \"\\(Get-Content ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\scripts\\\\Merge-DeploymentSettings.ps1''\\).Count\")",
+      "Bash(powershell -Command \"[System.Management.Automation.Language.Parser]::ParseFile\\(''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\scripts\\\\Merge-DeploymentSettings.ps1'', [ref]$null, [ref]$errors\\); $errors | ForEach-Object { Write-Host $_.Message }\")",
+      "Bash(powershell -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\test-parse.ps1')",
+      "Bash(powershell -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\test-parse2.ps1')",
+      "Bash(powershell -Command \"Remove-Item ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\test-parse.ps1'',''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\test-parse2.ps1'' -Force\")",
+      "Bash(powershell -Command \"Invoke-Pester ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\tests'' -Output Normal\")",
+      "Bash(powershell -Command \"Invoke-Pester ''./tests'' -Output Normal\")",
+      "Bash(powershell -NoProfile -NonInteractive -Command \"Set-Location ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines''; Invoke-Pester ''./tests'' -Output Normal 2>&1\")",
+      "Bash(powershell -NoProfile -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-tests.ps1')",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(powershell -NoProfile -Command \"Write-Host ''hello''; Get-Module -ListAvailable Pester | Select-Object -First 1 Name,Version | Out-Host\")",
+      "Bash(powershell -NoProfile -Command \"Write-Host ''start''; Invoke-Pester ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\tests\\\\Merge-DeploymentSettings.Tests.ps1'' -Output Minimal; Write-Host ''done''\")",
+      "Bash(powershell -NoProfile -Command \"Write-Host ''start''; Invoke-Pester ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\tests'' -Output Minimal; Write-Host ''done''\")",
+      "Bash(powershell -NoProfile -Command \"Write-Host ''running''; Invoke-Pester ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\tests\\\\Build-Json-Validation.Tests.ps1'' -Output Minimal; Write-Host ''done''\")",
+      "Bash(powershell -NoProfile -Command \"Write-Host ''running''; Invoke-Pester ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\tests\\\\Cloud-Flow-Detection.Tests.ps1'' -Output Minimal; Write-Host ''done''\")",
+      "Bash(powershell -NoProfile -Command \"Write-Host ''running''; Invoke-Pester ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\tests\\\\Config-Data-Validation.Tests.ps1'' -Output Minimal; Write-Host ''done''\")",
+      "Bash(powershell -NoProfile -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\check-syntax.ps1')",
+      "Bash(powershell -NoProfile -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-all-tests.ps1')",
+      "Bash(echo \"exit=$?\")",
+      "Bash(powershell -NoProfile -Command \":*)",
+      "Bash(powershell -Command \"Remove-Item ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-all-tests.ps1'',''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-cloud-tests.ps1'',''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-tests.ps1'',''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\debug-json.ps1'',''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\check-syntax.ps1'' -Force -ErrorAction SilentlyContinue\")",
+      "Bash(powershell -Command \"Test-Path ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\test-results.txt''\")",
+      "Bash(powershell -NoProfile -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-pp-tests.ps1')",
+      "Bash(powershell -NoProfile -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\find-emdash.ps1')",
+      "Bash(powershell -Command \"Remove-Item ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\test-results.txt'',''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-pp-tests.ps1'',''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\find-emdash.ps1'' -Force -ErrorAction SilentlyContinue\")",
+      "Bash(powershell -NoProfile -File 'c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-final.ps1')",
+      "Bash(powershell -Command \"Remove-Item ''c:\\\\Users\\\\FrankShin\\\\source\\\\repos\\\\pp-ci-cd\\\\pp-ci-cd-pipelines\\\\run-final.ps1'' -Force\")"
     ]
   }
 }
