@@ -2,7 +2,7 @@
 name: pp-cicd
 description: Generate Power Platform CI/CD pipelines for Azure DevOps from scratch. Creates export, release, and deploy pipelines with multi-stage approvals, deployment settings, version management, and cloud flow activation. Use when setting up a new Power Platform project or migrating to ADO pipelines.
 disable-model-invocation: true
-argument-hint: [environment-list e.g. "Dev QA Stage Prod"]
+argument-hint: 'environment-list e.g. "Dev Test Stage Prod"'
 ---
 
 # Power Platform CI/CD Pipeline Generator
@@ -15,7 +15,7 @@ Before generating anything, ask the user the following questions. Use the AskUse
 
 ### Required Information
 
-**Environments:** Which Power Platform environments will you deploy to? The arguments `$ARGUMENTS` may already specify these (e.g., `Dev QA Stage Prod`). If not provided, ask. Common patterns:
+**Environments:** Which Power Platform environments will you deploy to? The arguments `$ARGUMENTS` may already specify these (e.g., `Dev Test Stage Prod`). If not provided, ask. Common patterns:
 - `Dev Test Stage Prod` (standard 4-stage)
 - `Dev Test Prod` (no staging)
 - `Dev Test Prod` (simplified)
@@ -87,14 +87,21 @@ Generate each pipeline YAML file following the patterns in [pipeline-templates.m
    - Deployment settings merge (if enabled): runs Merge-DeploymentSettings.ps1
    - Creates PR to main with auto-complete (squash merge)
 
-3. **`pipelines/release-solutions.yml`** (if multi-solution release enabled) — Multi-stage release. Key decisions:
-   - Triggered by export pipeline completion on `main`
-   - Uses `deploy-environment.yml` template for each stage
-   - First environment deploys automatically; others require approval (per user config)
-   - Validates all artifacts upfront before any imports
-   - Skips solutions already at target version
+3. **`pipelines/release-solutions-test.yml`** (if multi-solution release enabled) — Deploys to Test only. Auto-triggered by export pipeline completion on `main`. No approval gate. Key decisions:
+   - `trigger: true` on the ExportPipeline resource
+   - Includes SetBuildName stage for traceability
+   - Uses `deploy-environment.yml` template for Test stage
    - Cloud flow activation (if enabled): acquires OAuth token, activates via Dataverse API, warns on failure
    - Config data upsert (if enabled): runs Sync-ConfigData.ps1 in Upsert mode after solution imports
+
+   **Additional auto-deploy environments** (e.g., QA, UAT): each gets its own thin pipeline file (e.g., `release-solutions-qa.yml`) using the exact same structure as Test but with that environment's `stageName`, `environmentName`, and `variableGroup`. No shared intermediate template is needed — each pipeline directly references `templates/deploy-environment.yml`. Ask the user if they want any additional auto-deploy environments (beyond Test) and generate a file for each.
+
+4. **`pipelines/release-solutions-promote.yml`** (if multi-solution release enabled) — Promotes to Stage and Prod. Manual trigger only — no auto-trigger. Key decisions:
+   - `trigger: none` on the ExportPipeline resource; user selects the run in the Resources panel
+   - Includes SetBuildName stage for traceability
+   - Uses `deploy-environment.yml` template for Stage and Prod stages (both with approval gates)
+   - `dependsOn` for Stage = `SetBuildName`; for Prod = Stage's `stageName`
+   - Same deployment logic (skip, upgrade, cloud flow activation, config data upsert) as Test
 
 ### 3c. Templates
 

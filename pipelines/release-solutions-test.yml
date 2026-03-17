@@ -1,0 +1,71 @@
+# =============================================================================
+# Pipeline: Release Power Platform Solutions to Test
+# =============================================================================
+# Triggers automatically when the daily export pipeline completes on main.
+# Deploys managed solutions to the Test environment only — no approval needed.
+#
+# To promote a Test-verified build to Stage and Prod, run the
+# release-solutions-promote pipeline manually and select the desired export run.
+#
+# Prerequisites:
+#   1. Power Platform Build Tools extension installed in the ADO org
+#   2. ADO Environment created:
+#      - "Power Platform Test"
+#   3. Variable group containing:
+#      - EnvironmentUrl  : Dataverse environment URL
+#      - ClientId        : Service Principal Application (Client) ID
+#      - ClientSecret    : Service Principal Client Secret (mark as secret)
+#      - TenantId        : Azure AD Tenant ID
+#      Group: PowerPlatform-Test
+#   4. The export-solutions pipeline publishes an artifact named
+#      "ManagedSolutions" containing build.json and *_version.zip files
+# =============================================================================
+
+parameters:
+  - name: dryRun
+    displayName: "Dry run (validate without deploying)"
+    type: boolean
+    default: false
+
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: ExportPipeline
+      source: "export-solutions"
+      trigger: true
+
+pool:
+  vmImage: "windows-latest"
+
+stages:
+  # ===========================================================================
+  # SetBuildName — propagate export branch name from the triggering pipeline
+  # ===========================================================================
+  - stage: SetBuildName
+    displayName: "Set build name"
+    jobs:
+      - job: SetName
+        displayName: "Tag run with export branch"
+        pool:
+          vmImage: "windows-latest"
+        steps:
+          - pwsh: |
+              $runName = "$(resources.pipeline.ExportPipeline.runName)"
+              if ($runName) {
+                Write-Host "##vso[build.updatebuildnumber]$runName"
+                Write-Host "##vso[build.addbuildtag]$runName"
+              }
+            displayName: "Set build name from export pipeline"
+
+  # ===========================================================================
+  # Test — Deploys automatically when the export pipeline completes
+  # ===========================================================================
+  - template: templates/deploy-environment.yml
+    parameters:
+      stageName: Test
+      displayName: "Deploy to Test"
+      environmentName: "Power Platform Test"
+      variableGroup: "PowerPlatform-Test"
+      dependsOn: SetBuildName
+      dryRun: ${{ parameters.dryRun }}

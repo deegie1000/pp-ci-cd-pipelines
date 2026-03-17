@@ -106,12 +106,20 @@ steps:
 
 ---
 
-## 2. Release Solutions (`release-solutions.yml`)
+## 2a. Release Solutions to Test (`release-solutions-test.yml`)
+
+Deploys to Test only. Auto-triggered by the export pipeline. Each auto-deploy environment gets its own thin pipeline file using this same pattern.
 
 ### Structure
 
 ```yaml
 # Header comment block
+
+parameters:
+  - name: dryRun
+    displayName: "Dry run (validate without deploying)"
+    type: boolean
+    default: false
 
 trigger: none
 
@@ -119,45 +127,120 @@ resources:
   pipelines:
     - pipeline: ExportPipeline
       source: "{export_pipeline_name}"       # e.g., "export-solutions"
-      trigger:
-        branches:
-          include:
-            - main
+      trigger: true
 
 pool:
   vmImage: "windows-latest"
 
 stages:
-  # Generate one stage per environment using the template
-  # First environment: dependsOn is empty (deploys automatically)
-  # Subsequent environments: dependsOn is previous stage
+  # SetBuildName — propagate export run name for traceability
+  - stage: SetBuildName
+    displayName: "Set build name"
+    jobs:
+      - job: SetName
+        pool:
+          vmImage: "windows-latest"
+        steps:
+          - pwsh: |
+              $runName = "$(resources.pipeline.ExportPipeline.runName)"
+              if ($runName) {
+                Write-Host "##vso[build.updatebuildnumber]$runName"
+                Write-Host "##vso[build.addbuildtag]$runName"
+              }
+            displayName: "Set build name from export pipeline"
 
+  # Test — deploys automatically, no approval
   - template: templates/deploy-environment.yml
     parameters:
-      stageName: "{env_1_short}"             # e.g., "Test"
-      displayName: "Deploy to {env_1}"
-      environmentName: "{ado_env_1}"         # e.g., "Power Platform Test"
-      variableGroup: "{var_group_1}"         # e.g., "PowerPlatform-Test"
-      dependsOn: ""                          # Empty = no dependency (first stage)
-
-  - template: templates/deploy-environment.yml
-    parameters:
-      stageName: "{env_2_short}"             # e.g., "Stage"
-      displayName: "Deploy to {env_2}"
-      environmentName: "{ado_env_2}"
-      variableGroup: "{var_group_2}"
-      dependsOn: "{env_1_short}"             # e.g., "Test"
-
-  # ... repeat for each environment
+      stageName: Test
+      displayName: "Deploy to Test"
+      environmentName: "{ado_env_test}"      # e.g., "Power Platform Test"
+      variableGroup: "{var_group_test}"      # e.g., "PowerPlatform-Test"
+      dependsOn: SetBuildName
+      dryRun: ${{ parameters.dryRun }}
 ```
 
 ### Key Generation Rules
 
-- The release pipeline itself contains NO deployment logic — it's all in the template
-- One `template:` block per environment
-- `dependsOn` chains stages sequentially
-- Pipeline resource alias (`ExportPipeline`) used in the template's download steps
-- The `source` value must match the exact ADO pipeline name
+- `trigger: true` on the pipeline resource — fires on every export completion
+- Only one deploy stage per pipeline file; no approval gate
+- Always includes SetBuildName stage for traceability
+- **Each additional auto-deploy environment gets its own pipeline file** (e.g., `release-solutions-qa.yml`) using the same structure with that environment's `stageName`, `environmentName`, and `variableGroup` values — no shared template needed
+
+---
+
+## 2b. Promote to Stage and Prod (`release-solutions-promote.yml`)
+
+Manually triggered. User selects the export run to promote. Both stages require approval.
+
+### Structure
+
+```yaml
+# Header comment block
+
+parameters:
+  - name: dryRun
+    displayName: "Dry run (validate without deploying)"
+    type: boolean
+    default: false
+
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: ExportPipeline
+      source: "{export_pipeline_name}"       # e.g., "export-solutions"
+      trigger: none                          # Manual only — no auto-trigger
+
+pool:
+  vmImage: "windows-latest"
+
+stages:
+  # SetBuildName — tag run with export branch name
+  - stage: SetBuildName
+    displayName: "Set build name"
+    jobs:
+      - job: SetName
+        pool:
+          vmImage: "windows-latest"
+        steps:
+          - pwsh: |
+              $runName = "$(resources.pipeline.ExportPipeline.runName)"
+              if ($runName) {
+                Write-Host "##vso[build.updatebuildnumber]$runName"
+                Write-Host "##vso[build.addbuildtag]$runName"
+              }
+            displayName: "Set build name from export pipeline"
+
+  # Stage — requires approval
+  - template: templates/deploy-environment.yml
+    parameters:
+      stageName: "{env_stage_short}"         # e.g., "Stage"
+      displayName: "Deploy to {env_stage}"
+      environmentName: "{ado_env_stage}"     # e.g., "Power Platform Stage"
+      variableGroup: "{var_group_stage}"     # e.g., "PowerPlatform-Stage"
+      dependsOn: SetBuildName
+      dryRun: ${{ parameters.dryRun }}
+
+  # Prod — requires approval, depends on Stage
+  - template: templates/deploy-environment.yml
+    parameters:
+      stageName: "{env_prod_short}"          # e.g., "Prod"
+      displayName: "Deploy to {env_prod}"
+      environmentName: "{ado_env_prod}"      # e.g., "Power Platform Prod"
+      variableGroup: "{var_group_prod}"      # e.g., "PowerPlatform-Prod"
+      dependsOn: "{env_stage_short}"         # e.g., "Stage"
+      dryRun: ${{ parameters.dryRun }}
+```
+
+### Key Generation Rules
+
+- `trigger: none` on the pipeline resource — manual only
+- No auto-trigger from the test pipeline; user selects the export run in the Resources panel
+- SetBuildName stage always included for traceability
+- Both Stage and Prod have approval gates configured on the ADO environments
+- `dependsOn` for Stage = `SetBuildName`; for Prod = Stage's `stageName`
+- The pipeline resource alias (`ExportPipeline`) must match what `deploy-environment.yml` uses in its download step
 
 ---
 

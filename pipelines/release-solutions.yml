@@ -1,99 +1,26 @@
 # =============================================================================
-# Pipeline: Release Power Platform Solutions (Test → Stage → Prod)
-# =============================================================================
-# Triggers automatically when the daily export pipeline completes.
-# Deploys managed solutions through three environments in sequence.
+# DEPRECATED — This pipeline has been replaced by two separate pipelines:
 #
-# Test deploys automatically. Stage and Prod require manual approval — configure
-# approval checks on the corresponding ADO environments:
-#   - "Power Platform Stage" → add approval gate
-#   - "Power Platform Prod"  → add approval gate
+#   release-solutions-test.yml    — auto-triggered, deploys to Test only
+#   release-solutions-promote.yml — manual, promotes to Stage and Prod
 #
-# Prerequisites:
-#   1. Power Platform Build Tools extension installed in the ADO org
-#   2. ADO Environments created:
-#      - "Power Platform Test"
-#      - "Power Platform Stage"  (with approval check)
-#      - "Power Platform Prod"   (with approval check)
-#   3. Variable groups per environment containing:
-#      - EnvironmentUrl  : Dataverse environment URL
-#      - ClientId        : Service Principal Application (Client) ID
-#      - ClientSecret    : Service Principal Client Secret (mark as secret)
-#      - TenantId        : Azure AD Tenant ID
-#      Groups: PowerPlatform-Test, PowerPlatform-Stage, PowerPlatform-Prod
-#   4. The export-solutions pipeline publishes an artifact named
-#      "ManagedSolutions" containing build.json and *_version.zip files
+# Please unregister this pipeline in Azure DevOps and register the two
+# replacements. See README.md § "ADO Setup — Step 6" for instructions.
 # =============================================================================
-
-parameters:
-  - name: dryRun
-    displayName: "Dry run (validate without deploying)"
-    type: boolean
-    default: false
 
 trigger: none
 
-resources:
-  pipelines:
-    - pipeline: ExportPipeline
-      source: "export-solutions"
-      trigger: true
-
-pool:
-  vmImage: "windows-latest"
-
-stages:
-  # ===========================================================================
-  # SetBuildName — propagate export branch name from the triggering pipeline
-  # ===========================================================================
-  - stage: SetBuildName
-    displayName: "Set build name"
-    jobs:
-      - job: SetName
-        displayName: "Tag run with export branch"
-        pool:
-          vmImage: "windows-latest"
-        steps:
-          - pwsh: |
-              $runName = "$(resources.pipeline.ExportPipeline.runName)"
-              if ($runName) {
-                Write-Host "##vso[build.updatebuildnumber]$runName"
-                Write-Host "##vso[build.addbuildtag]$runName"
-              }
-            displayName: "Set build name from export pipeline"
-
-  # ===========================================================================
-  # Test — Deploys automatically when the export pipeline completes
-  # ===========================================================================
-  - template: templates/deploy-environment.yml
-    parameters:
-      stageName: Test
-      displayName: "Deploy to Test"
-      environmentName: "Power Platform Test"
-      variableGroup: "PowerPlatform-Test"
-      dependsOn: SetBuildName
-      dryRun: ${{ parameters.dryRun }}
-
-  # ===========================================================================
-  # Stage — Requires manual approval (configure on the ADO environment)
-  # ===========================================================================
-  - template: templates/deploy-environment.yml
-    parameters:
-      stageName: Stage
-      displayName: "Deploy to Stage"
-      environmentName: "Power Platform Stage"
-      variableGroup: "PowerPlatform-Stage"
-      dependsOn: Test
-      dryRun: ${{ parameters.dryRun }}
-
-  # ===========================================================================
-  # Prod — Requires manual approval (configure on the ADO environment)
-  # ===========================================================================
-  - template: templates/deploy-environment.yml
-    parameters:
-      stageName: Prod
-      displayName: "Deploy to Prod"
-      environmentName: "Power Platform Prod"
-      variableGroup: "PowerPlatform-Prod"
-      dependsOn: Stage
-      dryRun: ${{ parameters.dryRun }}
+jobs:
+  - job: Deprecated
+    pool:
+      vmImage: "windows-latest"
+    steps:
+      - pwsh: |
+          Write-Host ""
+          Write-Host "============================================================"
+          Write-Host "  This pipeline has been deprecated."
+          Write-Host "  Use release-solutions-test  (auto, Test only)"
+          Write-Host "  and release-solutions-promote (manual, Stage + Prod)."
+          Write-Host "============================================================"
+          exit 1
+        displayName: "Pipeline deprecated — see README"

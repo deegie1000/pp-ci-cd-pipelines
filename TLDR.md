@@ -14,8 +14,10 @@ They move Power Platform solutions (apps, flows, etc.) from development environm
 
 | Pipeline | Runs | What it does |
 |---|---|---|
-| **Daily Export** | Automatically every night ~10 PM | Saves the latest Dev work to source control and kicks off the Test deployment |
-| **Release** | Automatically after Daily Export | Deploys to Test (automatic), then waits for approval to go to Stage and Prod |
+| **Daily Export** | Automatically every night ~10 PM | Saves the latest Dev work to source control and kicks off the Test and QA deployments |
+| **Release to Test** | Automatically after Daily Export | Deploys to Test — no approval needed |
+| **Release to QA** | Automatically after Daily Export | Deploys to QA — no approval needed |
+| **Promote to Stage + Prod** | Manually, when you're ready | Takes a verified build and deploys it to Stage and Prod with approval gates |
 
 ---
 
@@ -28,25 +30,45 @@ Every night ~10 PM
     ↓
 Daily Export runs — saves Dev solutions to source control
     ↓
-Release pipeline starts automatically
+Release to Test and Release to QA pipelines start automatically (in parallel)
     ↓
-Deploys to Test — no action needed from you
+Deploys to Test and QA — no action needed from you
+```
+
+When you're **ready to go to Stage and Prod**, you kick that off yourself:
+
+```
+You run the Promote pipeline manually
+    ↓
+Select the export run you want to promote
     ↓
 ⏸ Waits for your approval to deploy to Stage
     ↓
 ⏸ Waits for your approval to deploy to Prod
 ```
 
-You only need to step in to **approve the Stage and Prod deployments**.
+This split means Test and QA get updated on every nightly export, and Stage/Prod only get updated when you deliberately decide to promote.
 
 ---
 
-## How to approve a deployment to Stage or Prod
+## How to promote a build to Stage and Prod
 
-When a deployment is waiting for your approval, Azure DevOps will notify you (email or Teams, depending on your notification settings).
+When you're ready to promote a Test-verified release:
 
 1. Go to **Pipelines** in Azure DevOps
-2. Click on the **Release Solutions** pipeline
+2. Click on the **Promote to Stage and Prod** pipeline (`release-solutions-promote`)
+3. Click **Run pipeline**
+4. In the **Resources** panel, expand `export-solutions` and select the run you want to promote (usually the most recent one)
+5. Click **Run**
+
+Azure DevOps will notify approvers (email or Teams) when each environment is ready for approval.
+
+## How to approve a deployment to Stage or Prod
+
+When a deployment is waiting for your approval:
+
+1. Go to **Pipelines** in Azure DevOps
+2. Click on the **Promote to Stage and Prod** pipeline
 3. Find the run that's waiting — it will show a yellow "Waiting" badge
 4. Click into the run, then click the **Review** button next to the Stage or Prod deployment
 5. Add an optional comment and click **Approve**
@@ -79,9 +101,10 @@ All pipelines can be triggered manually. The Daily Export also runs automaticall
 - Common causes: a solution version mismatch (the version in the config doesn't match what's in Dev), or a connection issue to the Power Platform environment
 - Reach out to your developer with a screenshot of the error step
 
-**Approvals aren't showing up**
-- Check that you've been added as an approver on the relevant ADO environment (ask your ADO administrator)
+**Approvals aren't showing up for the Promote pipeline**
+- Check that you've been added as an approver on the `Power Platform Stage` or `Power Platform Prod` ADO environment (ask your ADO administrator)
 - Check your ADO notification settings
+- Note: approvals only appear in the **Promote to Stage and Prod** pipeline (`release-solutions-promote`), not in the Test or QA pipelines
 
 **The daily export didn't run**
 - The export looks for a branch named `export/{today's date}-{something}` in the repo — if no such branch exists, the pipeline marks itself as **Cancelled** (this is expected on nights with no planned release, and the release pipeline will not trigger). Ask your developer to create the export branch for that date when a release is needed.
