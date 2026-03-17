@@ -284,14 +284,14 @@ $importArgs = @(
 )
 
 # Power Pages deployMode overrides the default upgrade strategy for managed solutions.
-# isUnmanaged and isRollback skip staged upgrade entirely.
-if ($ppConfig -and $ppDeployMode -and -not $isUnmanaged) {
+# isRollback skips staged upgrade entirely.
+if ($ppConfig -and $ppDeployMode) {
   switch ($ppDeployMode) {
     "UPGRADE"         { $importArgs += "--stage-and-upgrade"; $importArgs += "--skip-lower-version" }
     "UPDATE"          { } # plain import — no staging flags
     "STAGE_FOR_UPGRADE" { $importArgs += "--import-as-holding" }
   }
-} elseif ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
+} elseif ($isUpgrade -and -not $isRollback) {
   $importArgs += "--stage-and-upgrade"
   $importArgs += "--skip-lower-version"
 }

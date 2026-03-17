@@ -208,16 +208,15 @@ steps:
         }
       }
 
-      # Validate: isUnmanaged=true requires isExisting=true
+      # Validate: isUnmanaged is not supported — only managed solutions can be deployed
       $invalidSolutions = @($solutions | Where-Object {
-        $_.PSObject.Properties["isUnmanaged"] -and [bool]$_.isUnmanaged -and
-        -not ($_.PSObject.Properties["isExisting"] -and [bool]$_.isExisting)
+        $_.PSObject.Properties["isUnmanaged"] -and [bool]$_.isUnmanaged
       })
       if ($invalidSolutions.Count -gt 0) {
         foreach ($s in $invalidSolutions) {
-          Write-Host "  Invalid: '$($s.name)' has isUnmanaged=true but isExisting is not true."
+          Write-Host "  Invalid: '$($s.name)' has isUnmanaged=true — deploying unmanaged solutions is not supported."
         }
-        Write-Error "build.json validation failed: isUnmanaged=true requires isExisting=true. The export pipeline always produces a managed zip for non-existing solutions, so isUnmanaged has no effect on the artifact and would cause a misleading import. Set isExisting=true or remove isUnmanaged."
+        Write-Error "build.json validation failed: isUnmanaged=true is not supported. Only managed solutions can be deployed. Remove the isUnmanaged field from all solution entries."
         exit 1
       }
 
@@ -328,7 +327,7 @@ steps:
       ClientSecret: $(ClientSecret)
 
   # ===========================================================================
-  # Step 9: Export solutions (unmanaged), clean unpack, and pack as managed
+  # Step 9: Export solutions, clean unpack, and pack as managed
   # ===========================================================================
   - pwsh: |
       $ErrorActionPreference = "Stop"
@@ -358,27 +357,19 @@ steps:
         Write-Host "============================================"
 
         # -----------------------------------------------------------------
-        # isExisting: skip export/unpack and use pre-existing zip.
-        # If isUnmanaged=true, pull from solutions/unmanaged/; otherwise managed.
+        # isExisting: skip export/unpack and use pre-existing managed zip.
         # -----------------------------------------------------------------
         if ($solution.isExisting -eq $true) {
-          $isUnmanaged = $solution.PSObject.Properties["isUnmanaged"] -and [bool]$solution.isUnmanaged
-          if ($isUnmanaged) {
-            $existingZip = Join-Path $unmanagedDir "${name}_${version}.zip"
-            $zipType = "unmanaged"
-          } else {
-            $existingZip = Join-Path $managedDir "${name}_${version}.zip"
-            $zipType = "managed"
-          }
-          Write-Host "  isExisting = true — using pre-existing $zipType zip."
+          $existingZip = Join-Path $managedDir "${name}_${version}.zip"
+          Write-Host "  isExisting = true — using pre-existing managed zip."
           if (-not (Test-Path $existingZip)) {
-            Write-Error "  isExisting is true but $zipType zip not found: $existingZip"
+            Write-Error "  isExisting is true but managed zip not found: $existingZip"
             $failedSolutions += $name
             continue
           }
           Copy-Item -Path $existingZip -Destination "$(Build.ArtifactStagingDirectory)/${name}_${version}.zip"
-          Write-Host "  Staged existing $zipType zip for artifact publishing."
-          Write-Host "`n  Solution '$name' (v$version) — skipped export (isExisting=true, isUnmanaged=$isUnmanaged)."
+          Write-Host "  Staged existing managed zip for artifact publishing."
+          Write-Host "`n  Solution '$name' (v$version) — skipped export (isExisting=true)."
           continue
         }
 

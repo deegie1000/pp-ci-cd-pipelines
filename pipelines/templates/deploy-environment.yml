@@ -265,15 +265,6 @@ stages:
                         Write-Host "  isRollback = true — staged upgrade will NOT be used; importing without version guard to allow lower version."
                       }
 
-                      # Read isUnmanaged flag from build.json solution entry
-                      $isUnmanaged = $false
-                      if ($solution.PSObject.Properties['isUnmanaged']) {
-                        $isUnmanaged = [bool]$solution.isUnmanaged
-                      }
-                      if ($isUnmanaged) {
-                        Write-Host "  isUnmanaged = true — importing as unmanaged; staged upgrade will NOT be used."
-                      }
-
                       # Read powerPagesConfiguration from build.json solution entry
                       $ppConfig = $null
                       if ($solution.PSObject.Properties['powerPagesConfiguration']) {
@@ -317,17 +308,15 @@ stages:
                         Write-Host "  Not currently installed — fresh install"
                       }
 
-                      # Import solution (managed or unmanaged based on isUnmanaged flag)
-                      if ($isUnmanaged) {
-                        Write-Host "  Importing unmanaged solution (isUnmanaged=true)..."
-                      } elseif ($ppConfig) {
+                      # Import managed solution
+                      if ($ppConfig) {
                         Write-Host "  Importing managed solution (Power Pages, deployMode=$ppDeployMode)..."
                       } else {
                         Write-Host "  Importing managed solution..."
                       }
 
                       # Build import arguments.
-                      # Unmanaged imports and rollbacks skip staged upgrade entirely.
+                      # Rollbacks skip staged upgrade entirely.
                       # powerPagesConfiguration.deployMode overrides the default upgrade strategy for managed solutions.
                       $importArgs = @(
                         "solution", "import",
@@ -337,7 +326,7 @@ stages:
                         "--max-async-wait-time", "60"
                       )
 
-                      if ($ppConfig -and $ppDeployMode -and -not $isUnmanaged) {
+                      if ($ppConfig -and $ppDeployMode) {
                         switch ($ppDeployMode) {
                           "UPGRADE" {
                             Write-Host "  Power Pages deployMode=UPGRADE — using --stage-and-upgrade"
@@ -359,7 +348,7 @@ stages:
                             }
                           }
                         }
-                      } elseif ($isUpgrade -and -not $isRollback -and -not $isUnmanaged) {
+                      } elseif ($isUpgrade -and -not $isRollback) {
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
                       }
@@ -504,7 +493,7 @@ stages:
                     }
 
                     Write-Host "`nAll solutions deployed successfully to ${{ parameters.stageName }}."
-                  displayName: "Deploy solutions (managed and unmanaged)"
+                  displayName: "Deploy solutions (managed)"
                   env:
                     ClientSecret: $(ClientSecret)
 

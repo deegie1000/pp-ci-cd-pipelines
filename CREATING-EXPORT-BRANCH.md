@@ -137,8 +137,7 @@ exports/2026-02-28-quarterly-release/
       "name": "CoreComponents",
       "version": "1.2.0.0",
       "postExportVersion": "1.3.0.0",
-      "createNewPatch": true,
-      "isUnmanaged": false
+      "createNewPatch": true
     },
     {
       "name": "MainApp",
@@ -169,7 +168,6 @@ exports/2026-02-28-quarterly-release/
 | `version` | The current version to export |
 | `postExportVersion` | The version the solution gets bumped to *after* exporting |
 | `createNewPatch` | `true` = create a patch during export; `false` = skip |
-| `isUnmanaged` | `true` = export as unmanaged only; omit or `false` = managed |
 | `includeDeploymentSettings` | `true` = include deployment settings during deploy |
 | `configData` | List of reference data tables to export alongside the solution |
 
