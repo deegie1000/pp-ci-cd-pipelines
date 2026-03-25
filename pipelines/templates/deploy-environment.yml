@@ -265,6 +265,17 @@ stages:
                         Write-Host "  isRollback = true — staged upgrade will NOT be used; importing without version guard to allow lower version."
                       }
 
+                      # Read deployMode from build.json solution entry.
+                      # Supported values: "upgrade" (default), "update"
+                      # "upgrade" uses --stage-and-upgrade when installing over an existing version.
+                      # "update"  uses a standard import (no staged upgrade).
+                      # powerPagesConfiguration.deployMode takes precedence for Power Pages solutions.
+                      $solutionDeployMode = ""
+                      if ($solution.PSObject.Properties['deployMode'] -and $solution.deployMode) {
+                        $solutionDeployMode = $solution.deployMode.ToLower()
+                        Write-Host "  deployMode = $solutionDeployMode"
+                      }
+
                       # Read powerPagesConfiguration from build.json solution entry
                       $ppConfig = $null
                       if ($solution.PSObject.Properties['powerPagesConfiguration']) {
@@ -316,8 +327,7 @@ stages:
                       }
 
                       # Build import arguments.
-                      # Rollbacks skip staged upgrade entirely.
-                      # powerPagesConfiguration.deployMode overrides the default upgrade strategy for managed solutions.
+                      # Priority: powerPagesConfiguration.deployMode > solution.deployMode > default (upgrade)
                       $importArgs = @(
                         "solution", "import",
                         "--path", $zipPath,
@@ -348,7 +358,13 @@ stages:
                             }
                           }
                         }
+                      } elseif ($solutionDeployMode -eq "update") {
+                        Write-Host "  deployMode=update — standard import (no staged upgrade)"
                       } elseif ($isUpgrade -and -not $isRollback) {
+                        # deployMode="upgrade" or unset — default to staged upgrade
+                        if ($solutionDeployMode -eq "upgrade") {
+                          Write-Host "  deployMode=upgrade — using --stage-and-upgrade"
+                        }
                         $importArgs += "--stage-and-upgrade"
                         $importArgs += "--skip-lower-version"
                       }

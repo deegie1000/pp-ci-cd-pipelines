@@ -1,0 +1,33 @@
+{
+  "EnvironmentVariables": [
+    {
+      "schemaName": "cr123_ApiBaseUrl",
+      "value": "https://api.example-test.com"
+    },
+    {
+      "schemaName": "cr123_MaxRetryCount",
+      "value": "3"
+    },
+    {
+      "schemaName": "cr123_FeatureFlagEnabled",
+      "value": "true"
+    }
+  ],
+  "ConnectionReferences": [
+    {
+      "logicalName": "cr123_sharedcommondataserviceforapps_abc12",
+      "connectionId": "your-dataverse-connection-id",
+      "connectorId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps"
+    },
+    {
+      "logicalName": "cr123_sharedoffice365_def34",
+      "connectionId": "your-office365-connection-id",
+      "connectorId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+    },
+    {
+      "logicalName": "cr123_sharedazureblob_ghi56",
+      "connectionId": "your-blob-connection-id",
+      "connectorId": "/providers/Microsoft.PowerApps/apis/shared_azureblob"
+    }
+  ]
+}

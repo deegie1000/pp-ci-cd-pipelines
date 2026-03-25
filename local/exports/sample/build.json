@@ -1,0 +1,67 @@
+{
+  "solutions": [
+    {
+      "_comment": "Minimal entry — just name and version. Defaults to deployMode=upgrade. No post-export version bump.",
+      "name": "CoreComponents",
+      "version": "1.0.0.0"
+    },
+    {
+      "_comment": "Standard upgrade with post-export version bump. After export, clones the solution in Dev to v2.2.0.0 (CloneAsSolution) so Dev is ready for the next cycle.",
+      "name": "MainApp",
+      "version": "2.1.0.0",
+      "deployMode": "upgrade",
+      "includeDeploymentSettings": true,
+      "postExportVersion": "2.2.0.0",
+      "createNewPatch": false
+    },
+    {
+      "_comment": "Creates a new patch in Dev after export (CloneAsPatch). The new patch is created at postExportVersion so developers immediately work on the patch. If the exported solution is itself a patch, the parent is used as the patch base and the old patch is prefixed with '(DO NOT USE)'.",
+      "name": "CoreComponents",
+      "version": "1.0.0.0",
+      "postExportVersion": "1.0.1.0",
+      "createNewPatch": true
+    },
+    {
+      "_comment": "Update strategy. deployMode=update skips --stage-and-upgrade. Use when the solution does not support staged upgrades.",
+      "name": "DataConnectors",
+      "version": "1.3.0.0",
+      "deployMode": "update",
+      "postExportVersion": "1.4.0.0",
+      "createNewPatch": false
+    },
+    {
+      "_comment": "Rolling back to a lower version. isRollback=true disables the version guard. postExportVersion and createNewPatch are ignored when isRollback=true.",
+      "name": "LegacyIntegration",
+      "version": "1.1.0.0",
+      "isRollback": true
+    },
+    {
+      "_comment": "Pre-built managed zip already in local/solutions/managed/. Export is skipped. postExportVersion is ignored when isExisting=true.",
+      "name": "ThirdPartyPackage",
+      "version": "3.0.0.0",
+      "isExisting": true
+    },
+    {
+      "_comment": "Power Pages solution. powerPagesConfiguration.deployMode controls the import strategy and takes precedence over the top-level deployMode.",
+      "name": "CustomerPortal",
+      "version": "1.0.0.0",
+      "postExportVersion": "1.0.1.0",
+      "createNewPatch": false,
+      "powerPagesConfiguration": {
+        "addAllExistingSiteComponentsForSites": "customer-portal",
+        "deployMode": "UPGRADE"
+      }
+    }
+  ],
+  "configData": [
+    {
+      "_comment": "Config data is extracted from Dev during export and upserted into the target environment during deploy.",
+      "name": "CountryCodes",
+      "entity": "cr123_countries",
+      "primaryKey": "cr123_countryid",
+      "select": "cr123_name,cr123_isocode",
+      "filter": "statecode eq 0",
+      "dataFile": "configdata/CountryCodes.json"
+    }
+  ]
+}
