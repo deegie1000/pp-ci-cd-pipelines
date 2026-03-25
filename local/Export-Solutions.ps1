@@ -482,6 +482,11 @@ if ($postManaged.Count -gt 0) {
                 $createNewPatch = [bool]$solution.createNewPatch
             }
 
+            if ($postVersion -eq $version) {
+                Write-Host "  Skipping '$name' — postExportVersion ($postVersion) is the same as version, no change needed."
+                continue
+            }
+
             Write-Host ""
             Write-Host "  $name -> v$postVersion  (createNewPatch: $createNewPatch)"
 

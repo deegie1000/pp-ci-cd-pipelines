@@ -1019,6 +1019,11 @@ steps:
           $createNewPatch = [bool]$solution.createNewPatch
         }
 
+        if ($postVersion -eq $solution.version) {
+          Write-Host "Skipping '$name' — postExportVersion ($postVersion) is the same as version, no change needed."
+          continue
+        }
+
         Write-Host "--------------------------------------------"
         Write-Host "Solution: $name -> v$postVersion  (createNewPatch: $createNewPatch)"
         Write-Host "--------------------------------------------"
