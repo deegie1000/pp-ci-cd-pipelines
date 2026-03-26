@@ -21,9 +21,13 @@ param(
     # deploymentSettings_{SettingsKey}.json. Defaults to "Test".
     [string]$SettingsKey = "Test",
 
-    # When provided by a caller (e.g. Run-Local.ps1), skips the interactive
+    # When provided by a caller (e.g. Local-UI.ps1), skips the interactive
     # subfolder prompt and uses this name directly.
     [string]$Subfolder,
+
+    # Suppresses interactive Read-Host prompts. Used by Local-UI.ps1 so the
+    # subprocess does not block waiting for stdin.
+    [switch]$SkipPrompts,
 
     [switch]$DryRun
 )
@@ -225,9 +229,11 @@ if (-not $azContext) {
     Connect-AzAccount
 } else {
     Write-Host "Already signed in as: $($azContext.Account.Id)"
-    $confirm = Read-Host "Use this account? [Y/n]"
-    if ($confirm -eq "n" -or $confirm -eq "N") {
-        Connect-AzAccount
+    if (-not $SkipPrompts) {
+        $confirm = Read-Host "Use this account? [Y/n]"
+        if ($confirm -eq "n" -or $confirm -eq "N") {
+            Connect-AzAccount
+        }
     }
 }
 

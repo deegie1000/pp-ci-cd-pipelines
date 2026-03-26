@@ -9,16 +9,22 @@ Run the export and deploy pipelines locally without ADO. No service principal cr
 
 ## Quick Start
 
+**GUI (recommended):**
+```powershell
+.\local\Local-UI.ps1
+```
+
+**Command line:**
 ```powershell
 .\local\Run-Local.ps1
 ```
-
-This prompts you to pick a mode, enter environment URLs, select a subfolder, and handles everything from there.
 
 ## Folder Structure
 
 ```
 local/
+  logs/                           # Log files written by Local-UI.ps1 (auto-created)
+    {timestamp}_{mode}_{subfolder}.log
   exports/                        # Your export configs — one subfolder per build
     sample/                       # Reference example (do not use directly)
       build.json
@@ -38,6 +44,7 @@ local/
   Export-Solutions.ps1
   Deploy-Solutions.ps1
   Run-Local.ps1
+  Local-UI.ps1
   README.md
 ```
 
@@ -45,7 +52,15 @@ local/
 
 ## Scripts
 
-### `Run-Local.ps1` — recommended entry point
+### `Local-UI.ps1` — GUI entry point
+
+WinForms GUI. Select mode, fill in URLs, pick a subfolder, and hit Run. Output streams in near real-time with color coding (errors in red, warnings in orange, successes in green). Each run writes a log file to `local/logs/` named `{timestamp}_{mode}_{subfolder}.log`.
+
+```powershell
+.\local\Local-UI.ps1
+```
+
+### `Run-Local.ps1` — command-line entry point
 
 Prompts for a mode and coordinates the other scripts. When running Export + Deploy, the subfolder is selected once and shared between both.
 
