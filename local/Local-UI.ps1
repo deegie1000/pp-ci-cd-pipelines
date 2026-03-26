@@ -28,23 +28,73 @@ $script:exitCode           = 0
 $script:pendingDeployFile  = $null
 $script:pendingDeployArgs  = $null
 $script:logWriter          = $null
+$script:configTargets      = @{}
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+function Reload-Targets {
+    $selected = if ($cmbTarget.SelectedItem) { $cmbTarget.SelectedItem.ToString() } else { "" }
+    $cmbTarget.Items.Clear()
+    [void]$cmbTarget.Items.Add("")   # blank = manual entry
+
+    if (Test-Path $configFile) {
+        try {
+            $cfg = Get-Content $configFile -Raw | ConvertFrom-Json
+            $script:configTargets = @{}
+            if ($cfg.targets) {
+                foreach ($t in $cfg.targets) {
+                    [void]$cmbTarget.Items.Add($t.name)
+                    $script:configTargets[$t.name] = $t
+                }
+            }
+        } catch { }
+    }
+
+    if ($selected -and $cmbTarget.Items.Contains($selected)) {
+        $cmbTarget.SelectedItem = $selected
+    } else {
+        $cmbTarget.SelectedIndex = 0
+    }
+}
+
 function Read-LocalConfig {
     if (Test-Path $configFile) {
         try {
             $cfg = Get-Content $configFile -Raw | ConvertFrom-Json
             if ($cfg.devEnvironmentUrl) { $txtDevUrl.Text = $cfg.devEnvironmentUrl }
+
+            # Reload targets first so we can restore the last selection
+            Reload-Targets
+
+            if ($cfg.lastTargetName -and $cmbTarget.Items.Contains($cfg.lastTargetName)) {
+                $cmbTarget.SelectedItem = $cfg.lastTargetName
+                # SelectedIndexChanged will fill URL + settings key
+            } elseif ($cfg.lastTargetUrl) {
+                $txtTargetUrl.Text  = $cfg.lastTargetUrl
+                $txtSettingsKey.Text = if ($cfg.lastSettingsKey) { $cfg.lastSettingsKey } else { "" }
+            }
         } catch { }
+    } else {
+        Reload-Targets
     }
 }
 
 function Save-LocalConfig {
     try {
-        $cfg = [ordered]@{ devEnvironmentUrl = $txtDevUrl.Text.Trim() }
-        $cfg | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
+        $targetName = if ($cmbTarget.SelectedItem) { $cmbTarget.SelectedItem.ToString() } else { "" }
+        $cfg = [ordered]@{
+            devEnvironmentUrl = $txtDevUrl.Text.Trim()
+            lastTargetName    = $targetName
+            lastTargetUrl     = $txtTargetUrl.Text.Trim()
+            lastSettingsKey   = $txtSettingsKey.Text.Trim()
+        }
+        # Preserve existing targets array so we don't overwrite it
+        if (Test-Path $configFile) {
+            $existing = Get-Content $configFile -Raw | ConvertFrom-Json
+            if ($existing.targets) { $cfg["targets"] = $existing.targets }
+        }
+        $cfg | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
     } catch { }
 }
 
@@ -131,7 +181,7 @@ $grpMode.Controls.AddRange(@($rdoExport, $rdoDeploy, $rdoBoth))
 $grpConfig          = New-Object System.Windows.Forms.GroupBox
 $grpConfig.Text     = "Configuration"
 $grpConfig.Location = New-Object System.Drawing.Point(10, 72)
-$grpConfig.Size     = New-Object System.Drawing.Size(822, 208)
+$grpConfig.Size     = New-Object System.Drawing.Size(822, 242)
 $grpConfig.Anchor   = "Top,Left,Right"
 
 $lx = 12 ; $lw = 178 ; $ix = 196
@@ -147,43 +197,63 @@ $txtDevUrl.Location  = New-Object System.Drawing.Point($ix, 24)
 $txtDevUrl.Size      = New-Object System.Drawing.Size(608, 22)
 $txtDevUrl.Anchor    = "Top,Left,Right"
 
+$lblTarget           = New-Object System.Windows.Forms.Label
+$lblTarget.Text      = "Target:"
+$lblTarget.Location  = New-Object System.Drawing.Point($lx, 60)
+$lblTarget.Size      = New-Object System.Drawing.Size($lw, 22)
+$lblTarget.TextAlign = "MiddleRight"
+
+$cmbTarget               = New-Object System.Windows.Forms.ComboBox
+$cmbTarget.Location      = New-Object System.Drawing.Point($ix, 58)
+$cmbTarget.Size          = New-Object System.Drawing.Size(570, 22)
+$cmbTarget.Anchor        = "Top,Left,Right"
+$cmbTarget.DropDownStyle = "DropDownList"
+
+$btnRefreshTargets           = New-Object System.Windows.Forms.Button
+$btnRefreshTargets.Text      = "Reload"
+$btnRefreshTargets.Location  = New-Object System.Drawing.Point(774, 57)
+$btnRefreshTargets.Size      = New-Object System.Drawing.Size(32, 25)
+$btnRefreshTargets.Anchor    = "Top,Right"
+$btnRefreshTargets.FlatStyle = "Flat"
+$btnRefreshTargets.Font      = New-Object System.Drawing.Font("Segoe UI", 7)
+
 $lblTargetUrl           = New-Object System.Windows.Forms.Label
 $lblTargetUrl.Text      = "Target Environment URL:"
-$lblTargetUrl.Location  = New-Object System.Drawing.Point($lx, 58)
+$lblTargetUrl.Location  = New-Object System.Drawing.Point($lx, 94)
 $lblTargetUrl.Size      = New-Object System.Drawing.Size($lw, 22)
 $lblTargetUrl.TextAlign = "MiddleRight"
 
 $txtTargetUrl          = New-Object System.Windows.Forms.TextBox
-$txtTargetUrl.Location = New-Object System.Drawing.Point($ix, 56)
+$txtTargetUrl.Location = New-Object System.Drawing.Point($ix, 92)
 $txtTargetUrl.Size     = New-Object System.Drawing.Size(608, 22)
 $txtTargetUrl.Anchor   = "Top,Left,Right"
 
 $lblSettingsKey           = New-Object System.Windows.Forms.Label
 $lblSettingsKey.Text      = "Settings Key:"
-$lblSettingsKey.Location  = New-Object System.Drawing.Point($lx, 90)
+$lblSettingsKey.Location  = New-Object System.Drawing.Point($lx, 126)
 $lblSettingsKey.Size      = New-Object System.Drawing.Size($lw, 22)
 $lblSettingsKey.TextAlign = "MiddleRight"
 
 $txtSettingsKey          = New-Object System.Windows.Forms.TextBox
-$txtSettingsKey.Location = New-Object System.Drawing.Point($ix, 88)
+$txtSettingsKey.Location = New-Object System.Drawing.Point($ix, 124)
 $txtSettingsKey.Size     = New-Object System.Drawing.Size(120, 22)
-$txtSettingsKey.Text     = "Test"
+$txtSettingsKey.Text     = ""
 
 $lblSubfolder           = New-Object System.Windows.Forms.Label
 $lblSubfolder.Text      = "Export Subfolder:"
-$lblSubfolder.Location  = New-Object System.Drawing.Point($lx, 122)
+$lblSubfolder.Location  = New-Object System.Drawing.Point($lx, 160)
 $lblSubfolder.Size      = New-Object System.Drawing.Size($lw, 22)
 $lblSubfolder.TextAlign = "MiddleRight"
 
 $cmbSubfolder               = New-Object System.Windows.Forms.ComboBox
-$cmbSubfolder.Location      = New-Object System.Drawing.Point($ix, 120)
+$cmbSubfolder.Location      = New-Object System.Drawing.Point($ix, 158)
 $cmbSubfolder.Size          = New-Object System.Drawing.Size(570, 22)
 $cmbSubfolder.Anchor        = "Top,Left,Right"
 $cmbSubfolder.DropDownStyle = "DropDownList"
 
 $btnRefresh           = New-Object System.Windows.Forms.Button
 $btnRefresh.Text      = "Refresh"
-$btnRefresh.Location  = New-Object System.Drawing.Point(774, 119)
+$btnRefresh.Location  = New-Object System.Drawing.Point(774, 157)
 $btnRefresh.Size      = New-Object System.Drawing.Size(32, 25)
 $btnRefresh.Anchor    = "Top,Right"
 $btnRefresh.FlatStyle = "Flat"
@@ -191,20 +261,23 @@ $btnRefresh.Font      = New-Object System.Drawing.Font("Segoe UI", 7)
 
 $chkDryRun          = New-Object System.Windows.Forms.CheckBox
 $chkDryRun.Text     = "Dry Run - validate without deploying"
-$chkDryRun.Location = New-Object System.Drawing.Point($ix, 158)
+$chkDryRun.Location = New-Object System.Drawing.Point($ix, 196)
 $chkDryRun.Size     = New-Object System.Drawing.Size(290, 22)
 
 $grpConfig.Controls.AddRange(@(
-    $lblDevUrl, $txtDevUrl, $lblTargetUrl, $txtTargetUrl,
-    $lblSettingsKey, $txtSettingsKey, $lblSubfolder, $cmbSubfolder,
-    $btnRefresh, $chkDryRun
+    $lblDevUrl, $txtDevUrl,
+    $lblTarget, $cmbTarget, $btnRefreshTargets,
+    $lblTargetUrl, $txtTargetUrl,
+    $lblSettingsKey, $txtSettingsKey,
+    $lblSubfolder, $cmbSubfolder, $btnRefresh,
+    $chkDryRun
 ))
 
 # -----------------------------------------------------------------------------
 # Actions panel
 # -----------------------------------------------------------------------------
 $pnlActions          = New-Object System.Windows.Forms.Panel
-$pnlActions.Location = New-Object System.Drawing.Point(10, 288)
+$pnlActions.Location = New-Object System.Drawing.Point(10, 322)
 $pnlActions.Size     = New-Object System.Drawing.Size(822, 46)
 $pnlActions.Anchor   = "Top,Left,Right"
 
@@ -244,7 +317,7 @@ $pnlActions.Controls.AddRange(@($btnRun, $btnStop, $btnClear, $progress))
 # Tab control (Output + History)
 # -----------------------------------------------------------------------------
 $tabControl          = New-Object System.Windows.Forms.TabControl
-$tabControl.Location = New-Object System.Drawing.Point(10, 342)
+$tabControl.Location = New-Object System.Drawing.Point(10, 376)
 $tabControl.Size     = New-Object System.Drawing.Size(822, 416)
 $tabControl.Anchor   = "Top,Left,Right,Bottom"
 
@@ -341,7 +414,26 @@ $tabHistory.Controls.Add($splitterHistory)
 $tabHistory.Controls.Add($lstHistory)
 $tabHistory.Controls.Add($pnlHistoryBar)
 
-$tabControl.TabPages.AddRange(@($tabOutput, $tabHistory))
+# ---- build.json tab ----
+$tabBuildJson      = New-Object System.Windows.Forms.TabPage
+$tabBuildJson.Text = "build.json"
+
+$txtBuildJson            = New-Object System.Windows.Forms.RichTextBox
+$txtBuildJson.Dock       = "Fill"
+$txtBuildJson.ReadOnly   = $true
+$txtBuildJson.BackColor  = [System.Drawing.Color]::FromArgb(252, 252, 252)
+$txtBuildJson.ScrollBars = "Both"
+$txtBuildJson.WordWrap   = $false
+foreach ($fontName in @("Cascadia Mono", "Consolas", "Courier New")) {
+    if ($installedFamilies -contains $fontName) {
+        $txtBuildJson.Font = New-Object System.Drawing.Font($fontName, 9)
+        break
+    }
+}
+
+$tabBuildJson.Controls.Add($txtBuildJson)
+
+$tabControl.TabPages.AddRange(@($tabOutput, $tabHistory, $tabBuildJson))
 
 $form.Controls.AddRange(@($grpMode, $grpConfig, $pnlActions, $tabControl))
 
@@ -393,25 +485,103 @@ function Update-Visibility {
     $isDeploy = $rdoDeploy.Checked
     $isBoth   = $rdoBoth.Checked
 
-    $lblDevUrl.Visible      = $isExport -or $isBoth
-    $txtDevUrl.Visible      = $isExport -or $isBoth
-    $lblTargetUrl.Visible   = $isDeploy -or $isBoth
-    $txtTargetUrl.Visible   = $isDeploy -or $isBoth
-    $lblSettingsKey.Visible = $isDeploy -or $isBoth
-    $txtSettingsKey.Visible = $isDeploy -or $isBoth
-    $chkDryRun.Visible      = $isDeploy -or $isBoth
+    $lblDevUrl.Visible           = $isExport -or $isBoth
+    $txtDevUrl.Visible           = $isExport -or $isBoth
+    $lblTarget.Visible           = $isDeploy -or $isBoth
+    $cmbTarget.Visible           = $isDeploy -or $isBoth
+    $btnRefreshTargets.Visible   = $isDeploy -or $isBoth
+    $lblTargetUrl.Visible        = $isDeploy -or $isBoth
+    $txtTargetUrl.Visible        = $isDeploy -or $isBoth
+    $lblSettingsKey.Visible      = $isDeploy -or $isBoth
+    $txtSettingsKey.Visible      = $isDeploy -or $isBoth
+    $chkDryRun.Visible           = $isDeploy -or $isBoth
 }
 
 function Refresh-Subfolders {
     $current = $cmbSubfolder.SelectedItem
     $cmbSubfolder.Items.Clear()
     foreach ($f in (Get-Subfolders)) { [void]$cmbSubfolder.Items.Add($f) }
-    if ($cmbSubfolder.Items.Count -gt 0) {
-        if ($current -and $cmbSubfolder.Items.Contains($current)) {
-            $cmbSubfolder.SelectedItem = $current
-        } else {
-            $cmbSubfolder.SelectedIndex = 0
+    if ($current -and $cmbSubfolder.Items.Contains($current)) {
+        $cmbSubfolder.SelectedItem = $current
+    }
+    # No default selection — user must choose explicitly
+}
+
+function Load-BuildJson {
+    $txtBuildJson.Clear()
+    $subfolder = $cmbSubfolder.SelectedItem
+    if (-not $subfolder) { return }
+
+    $buildPath = Join-Path $scriptDir "exports\$subfolder\build.json"
+    if (-not (Test-Path $buildPath)) {
+        $txtBuildJson.ForeColor = [System.Drawing.Color]::DimGray
+        $txtBuildJson.Text = "(no build.json found at exports\$subfolder\build.json)"
+        return
+    }
+
+    try {
+        $raw = Get-Content $buildPath -Raw -Encoding UTF8
+        # Re-format for consistent indentation
+        $pretty = $raw | ConvertFrom-Json | ConvertTo-Json -Depth 20
+
+        # Simple JSON syntax coloring: tokenize line by line
+        $colorKey     = [System.Drawing.Color]::FromArgb(0, 100, 180)   # blue  - keys
+        $colorString  = [System.Drawing.Color]::FromArgb(160, 60,  0)   # brown - string values
+        $colorNumber  = [System.Drawing.Color]::FromArgb(9,  134,  88)  # green - numbers/booleans
+        $colorDefault = [System.Drawing.Color]::FromArgb(50,  50,  50)  # dark gray - punctuation
+
+        foreach ($line in ($pretty -split "`r?`n")) {
+            # Key: "someKey":
+            if ($line -match '^(\s*)("[\w\s]+")\s*:(.*)$') {
+                $indent  = $Matches[1]
+                $key     = $Matches[2] + ":"
+                $rest    = $Matches[3]
+
+                $txtBuildJson.SelectionStart  = $txtBuildJson.TextLength
+                $txtBuildJson.SelectionColor  = $colorDefault
+                $txtBuildJson.AppendText($indent)
+
+                $txtBuildJson.SelectionStart  = $txtBuildJson.TextLength
+                $txtBuildJson.SelectionColor  = $colorKey
+                $txtBuildJson.AppendText($key)
+
+                # Value portion
+                $restTrim = $rest.Trim()
+                if ($restTrim -match '^"') {
+                    $txtBuildJson.SelectionStart = $txtBuildJson.TextLength
+                    $txtBuildJson.SelectionColor = $colorString
+                    $txtBuildJson.AppendText($rest)
+                } elseif ($restTrim -match '^[\d\-]|^true|^false|^null') {
+                    $txtBuildJson.SelectionStart = $txtBuildJson.TextLength
+                    $txtBuildJson.SelectionColor = $colorNumber
+                    $txtBuildJson.AppendText($rest)
+                } else {
+                    $txtBuildJson.SelectionStart = $txtBuildJson.TextLength
+                    $txtBuildJson.SelectionColor = $colorDefault
+                    $txtBuildJson.AppendText($rest)
+                }
+                $txtBuildJson.AppendText("`n")
+            } else {
+                # Value-only lines (array items, closing braces)
+                $trimmed = $line.Trim()
+                if ($trimmed -match '^"') {
+                    $txtBuildJson.SelectionStart = $txtBuildJson.TextLength
+                    $txtBuildJson.SelectionColor = $colorString
+                } elseif ($trimmed -match '^[\d\-]|^true|^false|^null') {
+                    $txtBuildJson.SelectionStart = $txtBuildJson.TextLength
+                    $txtBuildJson.SelectionColor = $colorNumber
+                } else {
+                    $txtBuildJson.SelectionStart = $txtBuildJson.TextLength
+                    $txtBuildJson.SelectionColor = $colorDefault
+                }
+                $txtBuildJson.AppendText($line + "`n")
+            }
         }
+        $txtBuildJson.SelectionStart = 0
+        $txtBuildJson.ScrollToCaret()
+    } catch {
+        $txtBuildJson.ForeColor = [System.Drawing.Color]::Crimson
+        $txtBuildJson.Text = "Error reading build.json: $_"
     }
 }
 
@@ -633,6 +803,17 @@ $rdoExport.add_CheckedChanged({ Update-Visibility })
 $rdoDeploy.add_CheckedChanged({ Update-Visibility })
 $rdoBoth.add_CheckedChanged({ Update-Visibility })
 
+$cmbTarget.add_SelectedIndexChanged({
+    $name = if ($cmbTarget.SelectedItem) { $cmbTarget.SelectedItem.ToString() } else { "" }
+    if ($name -and $script:configTargets -and $script:configTargets.ContainsKey($name)) {
+        $t = $script:configTargets[$name]
+        $txtTargetUrl.Text   = if ($t.url)         { $t.url }         else { "" }
+        $txtSettingsKey.Text = if ($t.settingsKey)  { $t.settingsKey }  else { "" }
+    }
+})
+
+$btnRefreshTargets.add_Click({ Reload-Targets })
+$cmbSubfolder.add_SelectedIndexChanged({ Load-BuildJson })
 $btnRefresh.add_Click({ Refresh-Subfolders })
 $btnRun.add_Click({ Start-Run })
 $btnClear.add_Click({ $logBox.Clear() })
@@ -720,5 +901,6 @@ $form.add_FormClosing({
 Update-Visibility
 Refresh-Subfolders
 Read-LocalConfig
+Load-BuildJson
 [void]$form.ShowDialog()
 $pollTimer.Stop()

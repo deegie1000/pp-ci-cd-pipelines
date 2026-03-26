@@ -1,2 +1,10 @@
 local.config.json
 logs/
+solutions/
+
+exports/*
+!exports/sample/
+!exports/sample/**
+
+deploymentSettings/*
+!deploymentSettings/deploymentSettings_sample.json
