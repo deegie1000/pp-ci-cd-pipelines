@@ -45,6 +45,7 @@ local/
   Deploy-Solutions.ps1
   Run-Local.ps1
   Local-UI.ps1
+  local.config.json                 # Local config (gitignored) — stores your Dev URL
   README.md
 ```
 
@@ -55,6 +56,8 @@ local/
 ### `Local-UI.ps1` — GUI entry point
 
 WinForms GUI. Select mode, fill in URLs, pick a subfolder, and hit Run. Output streams in near real-time with color coding (errors in red, warnings in orange, successes in green). Each run writes a log file to `local/logs/` named `{timestamp}_{mode}_{subfolder}.log`.
+
+The Dev Environment URL is saved to `local/local.config.json` (gitignored) and restored automatically on next launch.
 
 ```powershell
 .\local\Local-UI.ps1

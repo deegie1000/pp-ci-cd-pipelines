@@ -11,8 +11,9 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-$scriptDir = $PSScriptRoot
-$logsDir   = Join-Path $scriptDir "logs"
+$scriptDir  = $PSScriptRoot
+$logsDir    = Join-Path $scriptDir "logs"
+$configFile = Join-Path $scriptDir "local.config.json"
 New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 
 # -----------------------------------------------------------------------------
@@ -31,6 +32,22 @@ $script:logWriter          = $null
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+function Read-LocalConfig {
+    if (Test-Path $configFile) {
+        try {
+            $cfg = Get-Content $configFile -Raw | ConvertFrom-Json
+            if ($cfg.devEnvironmentUrl) { $txtDevUrl.Text = $cfg.devEnvironmentUrl }
+        } catch { }
+    }
+}
+
+function Save-LocalConfig {
+    try {
+        $cfg = [ordered]@{ devEnvironmentUrl = $txtDevUrl.Text.Trim() }
+        $cfg | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
+    } catch { }
+}
+
 function Get-Subfolders {
     $root = Join-Path $scriptDir "exports"
     if (Test-Path $root) {
@@ -516,6 +533,8 @@ function Start-Run {
         return
     }
 
+    Save-LocalConfig
+
     $modeLabel = if ($rdoExport.Checked) { "export" } elseif ($rdoDeploy.Checked) { "deploy" } else { "export-deploy" }
     $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
     $logFile   = Join-Path $logsDir "${timestamp}_${modeLabel}_${subfolder}.log"
@@ -700,5 +719,6 @@ $form.add_FormClosing({
 # =============================================================================
 Update-Visibility
 Refresh-Subfolders
+Read-LocalConfig
 [void]$form.ShowDialog()
 $pollTimer.Stop()
