@@ -190,6 +190,15 @@ function New-FailureCard([string]$message) {
     }
 }
 
+function Invoke-PacWithRetry([string[]]$arguments, [string]$description) {
+    & pac @arguments
+    if ($LASTEXITCODE -eq 0) { return $true }
+    Write-Host "  $description failed. Retrying in 30 seconds..."
+    Start-Sleep -Seconds 30
+    & pac @arguments
+    return ($LASTEXITCODE -eq 0)
+}
+
 # -----------------------------------------------------------------------------
 # Prompt for environment URL if not supplied
 # -----------------------------------------------------------------------------
@@ -282,7 +291,23 @@ if ($invalidSolutions.Count -gt 0) {
 Write-Header "Authenticate pac CLI (interactive browser)"
 
 Write-Host "Authenticating with: $EnvironmentUrl"
-pac auth create --environment $EnvironmentUrl
+$existingProfile = $null
+try {
+    $authListJson = (pac auth list --json) | Out-String
+    if ($LASTEXITCODE -eq 0 -and $authListJson.Trim()) {
+        $authProfiles = $authListJson | ConvertFrom-Json
+        $existingProfile = $authProfiles | Where-Object {
+            $_.environmentUrl -and $_.environmentUrl.TrimEnd('/') -eq $EnvironmentUrl.TrimEnd('/')
+        } | Select-Object -First 1
+    }
+} catch { }
+
+if ($existingProfile) {
+    Write-Host "Existing auth profile found (index $($existingProfile.index)) - selecting silently."
+    pac auth select --index $existingProfile.index
+} else {
+    pac auth create --environment $EnvironmentUrl
+}
 
 if ($LASTEXITCODE -ne 0) {
     Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Failed to authenticate with Power Platform (pac auth create).")
@@ -328,6 +353,9 @@ if ($notificationWebhookUrl) {
                    @{ title = "Build"; value = $Subfolder }
                    @{ title = "Time";  value = (Get-Date -Format "M/d/yyyy h:mm tt") }
                )}
+            @{ type = "TextBlock"; text = "Solutions to export:"; weight = "Bolder"; spacing = "Medium" }
+            @{ type = "FactSet"
+               facts = @($solutions | ForEach-Object { @{ title = $_.name; value = "v$($_.version)" } }) }
         )
     }
     Write-Host "Teams notified. Exports begin in 2:00..."
@@ -469,9 +497,7 @@ foreach ($solution in $solutions) {
     $unmanagedZip = Join-Path $unmanagedDir "$name.zip"
     Write-Host ""
     Write-Host "  Exporting unmanaged solution..."
-    pac solution export --name $name --path $unmanagedZip --overwrite
-
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Invoke-PacWithRetry @("solution", "export", "--name", $name, "--path", $unmanagedZip, "--overwrite") "Unmanaged export")) {
         Write-Host "  ERROR: Failed to export solution: $name"
         $failedSolutions += $name
         continue
@@ -486,13 +512,7 @@ foreach ($solution in $solutions) {
         Remove-Item -Path $solutionUnpackDir -Recurse -Force
     }
 
-    pac solution unpack `
-        --zipfile $unmanagedZip `
-        --folder $solutionUnpackDir `
-        --allowDelete true `
-        --allowWrite true
-
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Invoke-PacWithRetry @("solution", "unpack", "--zipfile", $unmanagedZip, "--folder", $solutionUnpackDir, "--allowDelete", "true", "--allowWrite", "true") "Unpack")) {
         Write-Host "  ERROR: Failed to unpack solution: $name"
         $failedSolutions += $name
         continue
@@ -556,9 +576,7 @@ foreach ($solution in $solutions) {
     $managedZip = Join-Path $managedDir "${name}_${version}.zip"
     Write-Host ""
     Write-Host "  Exporting managed solution..."
-    pac solution export --name $name --path $managedZip --managed --overwrite
-
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Invoke-PacWithRetry @("solution", "export", "--name", $name, "--path", $managedZip, "--managed", "--overwrite") "Managed export")) {
         Write-Host "  ERROR: Failed to export managed solution: $name"
         $failedSolutions += $name
         continue

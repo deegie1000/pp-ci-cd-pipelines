@@ -332,7 +332,23 @@ Write-Host "All artifacts validated."
 Write-Header "Authenticate pac CLI (interactive browser)"
 
 Write-Host "Authenticating with: $EnvironmentUrl"
-pac auth create --environment $EnvironmentUrl
+$existingProfile = $null
+try {
+    $authListJson = (pac auth list --json) | Out-String
+    if ($LASTEXITCODE -eq 0 -and $authListJson.Trim()) {
+        $authProfiles = $authListJson | ConvertFrom-Json
+        $existingProfile = $authProfiles | Where-Object {
+            $_.environmentUrl -and $_.environmentUrl.TrimEnd('/') -eq $EnvironmentUrl.TrimEnd('/')
+        } | Select-Object -First 1
+    }
+} catch { }
+
+if ($existingProfile) {
+    Write-Host "Existing auth profile found (index $($existingProfile.index)) - selecting silently."
+    pac auth select --index $existingProfile.index
+} else {
+    pac auth create --environment $EnvironmentUrl
+}
 
 if ($LASTEXITCODE -ne 0) {
     Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Failed to authenticate with Power Platform (pac auth create).")
@@ -346,11 +362,13 @@ pac auth list
 # -----------------------------------------------------------------------------
 # Acquire Dataverse REST API token (device code flow - no external modules)
 # -----------------------------------------------------------------------------
-$hasApiToken = $false
-$apiHeaders  = $null
+$hasApiToken      = $false
+$apiHeaders       = $null
+$tokenAcquiredAt  = $null
 Write-Header "Authenticate (Dataverse REST API)"
 try {
     $token = Get-DataverseToken $EnvironmentUrl
+    $tokenAcquiredAt = Get-Date
     $apiHeaders = @{
         "Authorization"    = "Bearer $token"
         "OData-MaxVersion" = "4.0"
@@ -416,6 +434,9 @@ Send-TeamsCard $notificationWebhookUrl @{
                @{ title = "Stage";   value = $SettingsKey }
                @{ title = "Time";    value = (Get-Date -Format "M/d/yyyy h:mm tt") }
            )}
+        @{ type = "TextBlock"; text = "Solutions to deploy:"; weight = "Bolder"; spacing = "Medium" }
+        @{ type = "FactSet"
+           facts = @($solutions | ForEach-Object { @{ title = $_.name; value = "v$($_.version)" } }) }
     )
 }
 
@@ -570,6 +591,20 @@ foreach ($solution in $solutions) {
     }
 
     if ($hasCloudFlows -and $hasApiToken -and -not $DryRun) {
+        # Refresh token if acquired more than 50 minutes ago (tokens expire at 60 min)
+        if (((Get-Date) - $tokenAcquiredAt).TotalMinutes -ge 50) {
+            Write-Host "  Dataverse token nearing expiry - refreshing..."
+            try {
+                $token = Get-DataverseToken $EnvironmentUrl
+                $tokenAcquiredAt = Get-Date
+                $apiHeaders["Authorization"] = "Bearer $token"
+                Write-Host "  Token refreshed."
+            } catch {
+                Write-Host "  WARNING: Could not refresh Dataverse token: $_"
+                Write-Host "  Cloud flow activation will be skipped for this solution."
+                continue
+            }
+        }
         Write-Host "  Checking cloud flow statuses..."
 
         try {
@@ -698,9 +733,9 @@ $duration = if ($elapsed.TotalHours -ge 1) { "{0}h {1}m {2}s" -f [int]$elapsed.T
             elseif ($elapsed.TotalMinutes -ge 1) { "{0}m {1}s" -f [int]$elapsed.TotalMinutes, $elapsed.Seconds }
             else { "{0}s" -f [int]$elapsed.TotalSeconds }
 $solFacts = @(foreach ($sol in $solutions) {
-    $status = if ($failedSolutions  -contains $sol.name) { "✗" }
-              elseif ($skippedSolutions -contains $sol.name) { "—" }
-              else { "✓" }
+    $status = if ($failedSolutions  -contains $sol.name) { [char]0x2717 }
+              elseif ($skippedSolutions -contains $sol.name) { [char]0x2014 }
+              else { [char]0x2713 }
     @{ title = "$($sol.name)  v$($sol.version)"; value = $status }
 })
 Send-TeamsCard $notificationWebhookUrl @{

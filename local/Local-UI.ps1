@@ -128,7 +128,8 @@ function Get-Subfolders {
     $root = Join-Path $scriptDir "exports"
     if (Test-Path $root) {
         return @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
-                 Sort-Object Name | ForEach-Object { $_.Name })
+                 Where-Object { $_.Name -ne 'sample' } |
+                 Sort-Object Name -Descending | ForEach-Object { $_.Name })
     }
     return @()
 }
