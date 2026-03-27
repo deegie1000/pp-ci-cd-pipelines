@@ -4,8 +4,11 @@ Run the export and deploy pipelines locally without ADO. No service principal cr
 
 ## Prerequisites
 
-- [pac CLI](https://learn.microsoft.com/en-us/power-platform/developer/cli/introduction) — `dotnet tool install --global Microsoft.PowerApps.CLI.Tool`
-- [Az.Accounts PowerShell module](https://learn.microsoft.com/en-us/powershell/module/az.accounts) — `Install-Module Az.Accounts -Scope CurrentUser`
+- [pac CLI](https://learn.microsoft.com/en-us/power-platform/developer/cli/introduction)
+  ```powershell
+  dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+  ```
+
 
 ## Quick Start
 
@@ -191,6 +194,22 @@ Both scripts authenticate twice — once for `pac` (solution import/export) and 
 | Auth | Used for | How |
 |---|---|---|
 | `pac auth create` | Solution export/import, `pac solution list` | Interactive browser login |
-| `Connect-AzAccount` + `Get-AzAccessToken` | Dataverse REST API calls | Interactive browser login via Az module |
+| OAuth 2.0 device code flow | Dataverse REST API calls | No external modules — prints a code, open the URL, sign in |
 
-If you're already signed into Azure (`Get-AzContext`), the scripts will ask if you want to reuse the existing session.
+Both prompts happen each run. For the device code step, the browser will open automatically to the correct URL. Enter the displayed code and sign in — the script will continue automatically.
+
+## Teams Notifications
+
+If `notificationWebhookUrl` is set in `local.config.json`, the scripts send Adaptive Cards to your Teams group chat at key milestones:
+
+| # | Trigger | Sent by | Card |
+|---|---------|---------|------|
+| 1 | Run clicked (export modes) | `Local-UI.ps1` | ⚠️ Code Freeze Starting — 2-minute countdown begins |
+| 2 | Export loop starts | `Export-Solutions.ps1` | 🚀 Exports Starting |
+| 3 | Export completes | `Export-Solutions.ps1` | ✅ Exports Complete (with counts + duration) |
+| 4 | Deploy loop starts | `Deploy-Solutions.ps1` | 🚀 Release Starting |
+| 5 | Deploy completes | `Deploy-Solutions.ps1` | ✅ Release Complete (with solution list + duration) |
+
+The 2-minute wait (card 1 → card 2) only applies when running from the GUI and only for modes that include export. The Stop button cancels the countdown.
+
+**Setup:** In Teams, go to the group chat → **+** → **Workflows** → **Post to a channel when a webhook request is received** → copy the webhook URL → paste into `local.config.json` as `notificationWebhookUrl`. The URL is gitignored with the rest of `local.config.json`.

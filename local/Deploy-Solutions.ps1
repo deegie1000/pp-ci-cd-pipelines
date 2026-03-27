@@ -10,7 +10,6 @@
 #
 # Prerequisites:
 #   - pac CLI installed (dotnet tool install --global Microsoft.PowerApps.CLI.Tool)
-#   - Az.Accounts PowerShell module (Install-Module Az.Accounts)
 # =============================================================================
 
 [CmdletBinding()]
@@ -28,6 +27,9 @@ param(
     # Suppresses interactive Read-Host prompts. Used by Local-UI.ps1 so the
     # subprocess does not block waiting for stdin.
     [switch]$SkipPrompts,
+
+    # When set, suppresses all Teams notifications regardless of local.config.json.
+    [switch]$SkipTeamsNotifications,
 
     [switch]$DryRun
 )
@@ -51,15 +53,76 @@ function Assert-Command([string]$name) {
     }
 }
 
+# Acquire a Dataverse bearer token using the OAuth 2.0 device code flow.
+# No redirect URI or app registration required — prints a URL and code for the user to visit.
+function Get-DataverseToken([string]$environmentUrl) {
+    $clientId = "9cee029c-6210-4654-90bb-17e6e9d36617"  # Power Platform CLI
+
+    # Discover login base and tenant ID from the Dataverse 401 WWW-Authenticate header.
+    # This is more reliable than guessing from the environment URL because the Azure AD
+    # tenant may be in the public cloud even when the Dataverse org is in a government cloud.
+    $loginBase = "https://login.microsoftonline.com"
+    $tenant    = "organizations"
+    try {
+        $probe = Invoke-WebRequest -Uri "$environmentUrl/api/data/v9.2/" -UseBasicParsing -ErrorAction SilentlyContinue
+    } catch {
+        $probe = $_.Exception.Response
+    }
+    $wwwAuth = if ($probe -and $probe.Headers) {
+        try { $probe.Headers['WWW-Authenticate'] } catch { $null }
+    }
+    if ($wwwAuth -match 'authorization_uri="?(https://login\.[^/,"]+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
+        $loginBase = $Matches[1]
+        $tenant    = $Matches[2]
+        Write-Host "Discovered login: $loginBase, tenant: $tenant"
+    }
+
+    $scope = "$environmentUrl/.default"
+
+    # Request a device code
+    $dcResp = Invoke-RestMethod -Method Post `
+        -Uri "$loginBase/$tenant/oauth2/v2.0/devicecode" `
+        -ContentType "application/x-www-form-urlencoded" `
+        -Body "client_id=$clientId&scope=$([uri]::EscapeDataString($scope))"
+
+    $verifyUrl = if ($dcResp.verification_uri) { $dcResp.verification_uri } else { $dcResp.verification_url }
+    Write-Host ""
+    Write-Host "=== Dataverse Login ==="
+    Write-Host "Opening browser to: $verifyUrl"
+    Write-Host "Enter code: $($dcResp.user_code)"
+    Write-Host "======================="
+    Write-Host ""
+    Start-Process $verifyUrl
+
+    # Poll until the user completes sign-in or the code expires
+    $interval  = if ($dcResp.interval) { [int]$dcResp.interval } else { 5 }
+    $expiresAt = (Get-Date).AddSeconds([int]$dcResp.expires_in)
+
+    while ((Get-Date) -lt $expiresAt) {
+        Start-Sleep -Seconds $interval
+        try {
+            $tokResp = Invoke-RestMethod -Method Post `
+                -Uri "$loginBase/$tenant/oauth2/v2.0/token" `
+                -ContentType "application/x-www-form-urlencoded" `
+                -Body "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$clientId&device_code=$([uri]::EscapeDataString($dcResp.device_code))"
+            return $tokResp.access_token
+        } catch {
+            $errBody = $null
+            try { $errBody = ($_.ErrorDetails.Message | ConvertFrom-Json) } catch {}
+            $errCode = if ($errBody) { $errBody.error } else { $null }
+            if ($errCode -eq "authorization_pending") { continue }
+            if ($errCode -eq "slow_down") { $interval += 5; continue }
+            throw "Token error: $errCode - $($errBody.error_description)"
+        }
+    }
+    throw "Device code expired before authentication completed."
+}
+
 # -----------------------------------------------------------------------------
 # Prereq checks
 # -----------------------------------------------------------------------------
 Assert-Command "pac"
 
-if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
-    Write-Error "Az.Accounts module not found. Run: Install-Module Az.Accounts -Scope CurrentUser"
-    exit 1
-}
 
 # -----------------------------------------------------------------------------
 # Dry run notice
@@ -67,7 +130,7 @@ if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
 if ($DryRun) {
     Write-Host ""
     Write-Host "============================================"
-    Write-Host "  DRY RUN MODE — no changes will be made"
+    Write-Host "  DRY RUN MODE -no changes will be made"
     Write-Host "============================================"
     Write-Host ""
 }
@@ -80,6 +143,63 @@ $localRoot   = $PSScriptRoot
 $exportsRoot = Join-Path $localRoot "exports"
 $managedDir  = Join-Path $localRoot "solutions/managed"
 $scriptsDir  = Join-Path $repoRoot "scripts"
+
+# -----------------------------------------------------------------------------
+# Teams notifications (optional)
+# Reads notificationWebhookUrl from local.config.json if present.
+# -----------------------------------------------------------------------------
+$notificationWebhookUrl = $null
+$localConfigPath = Join-Path $localRoot "local.config.json"
+if (Test-Path $localConfigPath) {
+    try {
+        $lc = Get-Content $localConfigPath -Raw | ConvertFrom-Json
+        if ($lc.notificationWebhookUrl) { $notificationWebhookUrl = $lc.notificationWebhookUrl }
+    } catch {}
+}
+
+if ($SkipTeamsNotifications) { $notificationWebhookUrl = $null }
+
+$startTime = Get-Date
+
+function Send-TeamsCard([string]$webhookUrl, [object]$card) {
+    if (-not $webhookUrl) { return }
+    try {
+        $payload = [ordered]@{
+            type        = "message"
+            attachments = @([ordered]@{
+                contentType = "application/vnd.microsoft.card.adaptive"
+                contentUrl  = $null
+                content     = $card
+            })
+        } | ConvertTo-Json -Depth 20
+        $payload = [System.Text.RegularExpressions.Regex]::Replace($payload, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value[0] })
+        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        Invoke-RestMethod -Uri $webhookUrl -Method Post -ContentType "application/json; charset=utf-8" -Body $bodyBytes -ErrorAction Stop | Out-Null
+        Write-Host "Teams notification sent."
+    } catch {
+        Write-Host "WARNING: Teams notification failed: $($_.Exception.Message)"
+    }
+}
+
+function New-FailureCard([string]$message) {
+    @{
+        '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+        type    = "AdaptiveCard"
+        version = "1.4"
+        body    = @(
+            @{ type = "Container"; style = "attention"; bleed = $true
+               items = @(@{ type = "TextBlock"; text = "$([char]0x274C)  Release Failed"; weight = "Bolder"; size = "Large" }) }
+            @{ type = "TextBlock"; text = $message; wrap = $true; spacing = "Medium" }
+            @{ type = "FactSet"; spacing = "Medium"
+               facts = @(
+                   @{ title = "Build";  value = if ($Subfolder) { $Subfolder } else { "(not selected)" } }
+                   @{ title = "Target"; value = if ($EnvironmentUrl) { $EnvironmentUrl } else { "(not set)" } }
+                   @{ title = "Stage";  value = if ($SettingsKey) { $SettingsKey } else { "(not set)" } }
+                   @{ title = "Time";   value = (Get-Date -Format "M/d/yyyy h:mm tt") }
+               )}
+        )
+    }
+}
 
 # -----------------------------------------------------------------------------
 # Prompt for environment URL if not supplied
@@ -104,12 +224,14 @@ Write-Header "Select Export Subfolder"
 $subfolders = Get-ChildItem -Path $exportsRoot -Directory | Sort-Object Name
 
 if ($subfolders.Count -eq 0) {
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "No subfolders found in exports/. Run Export-Solutions.ps1 first.")
     Write-Error "No subfolders found in: $exportsRoot`nRun Export-Solutions.ps1 first."
     exit 1
 }
 
 if ($Subfolder) {
     if (-not ($subfolders | Where-Object { $_.Name -eq $Subfolder })) {
+        Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Subfolder '$Subfolder' not found in exports/.")
         Write-Error "Subfolder '$Subfolder' not found in: $exportsRoot"
         exit 1
     }
@@ -142,6 +264,7 @@ Write-Host "Using subfolder: $Subfolder"
 Write-Header "Read build.json"
 
 if (-not (Test-Path $buildJsonPath)) {
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "build.json not found for subfolder '$Subfolder'.")
     Write-Error "build.json not found at: $buildJsonPath"
     exit 1
 }
@@ -150,7 +273,7 @@ $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
 $solutions   = if ($buildConfig.solutions) { @($buildConfig.solutions) } else { @() }
 
 if ($solutions.Count -eq 0) {
-    Write-Host "No solutions in build.json — config data only run."
+    Write-Host "No solutions in build.json -config data only run."
 } else {
     Write-Host "Solutions to deploy ($($solutions.Count)):"
     foreach ($s in $solutions) {
@@ -196,7 +319,8 @@ foreach ($solution in $solutions) {
 
 if ($missingArtifacts.Count -gt 0) {
     Write-Host ""
-    Write-Error "Artifact validation failed — $($missingArtifacts.Count) file(s) missing. Run Export-Solutions.ps1 first."
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Artifact validation failed for '$Subfolder': $($missingArtifacts.Count) file(s) missing. Run Export-Solutions.ps1 first.")
+    Write-Error "Artifact validation failed -$($missingArtifacts.Count) file(s) missing. Run Export-Solutions.ps1 first."
     exit 1
 }
 
@@ -211,6 +335,7 @@ Write-Host "Authenticating with: $EnvironmentUrl"
 pac auth create --environment $EnvironmentUrl
 
 if ($LASTEXITCODE -ne 0) {
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Failed to authenticate with Power Platform (pac auth create).")
     Write-Error "Failed to authenticate with Power Platform"
     exit 1
 }
@@ -219,40 +344,25 @@ Write-Host "pac auth list:"
 pac auth list
 
 # -----------------------------------------------------------------------------
-# Connect Azure account for REST API token (flow activation, config data)
+# Acquire Dataverse REST API token (device code flow - no external modules)
 # -----------------------------------------------------------------------------
-Write-Header "Authenticate Azure (for Dataverse REST API)"
-
-$azContext = Get-AzContext -ErrorAction SilentlyContinue
-if (-not $azContext) {
-    Write-Host "No Azure context found — launching interactive login..."
-    Connect-AzAccount
-} else {
-    Write-Host "Already signed in as: $($azContext.Account.Id)"
-    if (-not $SkipPrompts) {
-        $confirm = Read-Host "Use this account? [Y/n]"
-        if ($confirm -eq "n" -or $confirm -eq "N") {
-            Connect-AzAccount
-        }
-    }
-}
-
 $hasApiToken = $false
+$apiHeaders  = $null
+Write-Header "Authenticate (Dataverse REST API)"
 try {
-    $tokenObj = Get-AzAccessToken -ResourceUrl $EnvironmentUrl
+    $token = Get-DataverseToken $EnvironmentUrl
     $apiHeaders = @{
-        "Authorization"    = "Bearer $($tokenObj.Token)"
+        "Authorization"    = "Bearer $token"
         "OData-MaxVersion" = "4.0"
         "OData-Version"    = "4.0"
         "Content-Type"     = "application/json"
         "Accept"           = "application/json"
     }
     $hasApiToken = $true
-    Write-Host "Acquired Dataverse API token for flow activation."
+    Write-Host "Acquired Dataverse API token."
 } catch {
     Write-Host "WARNING: Could not acquire Dataverse API token: $_"
     Write-Host "Cloud flow activation will be skipped."
-    $apiHeaders = $null
 }
 
 # -----------------------------------------------------------------------------
@@ -263,6 +373,7 @@ Write-Header "Query Installed Solutions"
 $listJson = (pac solution list --json) | Out-String
 
 if ($LASTEXITCODE -ne 0) {
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Failed to list solutions in target environment '$EnvironmentUrl'.")
     Write-Error "Failed to list solutions in target environment"
     exit 1
 }
@@ -290,6 +401,24 @@ $skippedSolutions  = @()
 $deployedSolutions = @()
 $flowWarnings      = @()
 
+Send-TeamsCard $notificationWebhookUrl @{
+    '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+    type    = "AdaptiveCard"
+    version = "1.4"
+    body    = @(
+        @{ type = "Container"; style = "accent"; bleed = $true
+           items = @(@{ type = "TextBlock"; text = "$([System.Char]::ConvertFromUtf32(0x1F680))  Release Starting"; weight = "Bolder"; size = "Large" }) }
+        @{ type = "TextBlock"; text = "Solution imports are now beginning."; wrap = $true; spacing = "Medium" }
+        @{ type = "FactSet"; spacing = "Medium"
+           facts = @(
+               @{ title = "Build";   value = $Subfolder }
+               @{ title = "Target";  value = $EnvironmentUrl }
+               @{ title = "Stage";   value = $SettingsKey }
+               @{ title = "Time";    value = (Get-Date -Format "M/d/yyyy h:mm tt") }
+           )}
+    )
+}
+
 foreach ($solution in $solutions) {
     $name    = $solution.name
     $version = $solution.version
@@ -306,7 +435,7 @@ foreach ($solution in $solutions) {
         $isRollback = [bool]$solution.isRollback
     }
     if ($isRollback) {
-        Write-Host "  isRollback = true — staged upgrade will NOT be used."
+        Write-Host "  isRollback = true -staged upgrade will NOT be used."
     }
 
     # Solution-level deployMode. Supported values: "upgrade" (default), "update"
@@ -335,29 +464,29 @@ foreach ($solution in $solutions) {
     if ($installed.ContainsKey($name)) {
         $installedVersion = $installed[$name]
         if ($installedVersion -eq $version) {
-            Write-Host "  Already installed at v$version — skipping."
+            Write-Host "  Already installed at v$version -skipping."
             $skippedSolutions += $name
             continue
         }
 
         try {
             if (([Version]$installedVersion) -gt ([Version]$version) -and -not $isRollback) {
-                Write-Host "  Installed v$installedVersion is higher than target v$version — skipping (not a rollback)."
+                Write-Host "  Installed v$installedVersion is higher than target v$version -skipping (not a rollback)."
                 $skippedSolutions += $name
                 continue
             }
         } catch {
-            Write-Host "  WARNING: Could not compare versions '$installedVersion' and '$version' — proceeding."
+            Write-Host "  WARNING: Could not compare versions '$installedVersion' and '$version' -proceeding."
         }
 
         if ($isRollback) {
-            Write-Host "  Rolling back: v$installedVersion → v$version"
+            Write-Host "  Rolling back: v$installedVersion ->v$version"
         } else {
-            Write-Host "  Upgrading: v$installedVersion → v$version"
+            Write-Host "  Upgrading: v$installedVersion ->v$version"
         }
         $isUpgrade = $true
     } else {
-        Write-Host "  Not currently installed — fresh install."
+        Write-Host "  Not currently installed -fresh install."
     }
 
     # Build pac import arguments
@@ -372,19 +501,19 @@ foreach ($solution in $solutions) {
     if ($ppConfig -and $ppDeployMode) {
         switch ($ppDeployMode) {
             "UPGRADE" {
-                Write-Host "  Power Pages deployMode=UPGRADE — using --stage-and-upgrade"
+                Write-Host "  Power Pages deployMode=UPGRADE -using --stage-and-upgrade"
                 $importArgs += "--stage-and-upgrade"
                 $importArgs += "--skip-lower-version"
             }
             "UPDATE" {
-                Write-Host "  Power Pages deployMode=UPDATE — standard import"
+                Write-Host "  Power Pages deployMode=UPDATE -standard import"
             }
             "STAGE_FOR_UPGRADE" {
-                Write-Host "  Power Pages deployMode=STAGE_FOR_UPGRADE — using --import-as-holding"
+                Write-Host "  Power Pages deployMode=STAGE_FOR_UPGRADE -using --import-as-holding"
                 $importArgs += "--import-as-holding"
             }
             default {
-                Write-Host "  WARNING: Unknown powerPagesConfiguration.deployMode '$ppDeployMode' — falling back to default strategy."
+                Write-Host "  WARNING: Unknown powerPagesConfiguration.deployMode '$ppDeployMode' -falling back to default strategy."
                 if ($isUpgrade -and -not $isRollback) {
                     $importArgs += "--stage-and-upgrade"
                     $importArgs += "--skip-lower-version"
@@ -392,11 +521,11 @@ foreach ($solution in $solutions) {
             }
         }
     } elseif ($solutionDeployMode -eq "update") {
-        Write-Host "  deployMode=update — standard import (no staged upgrade)"
+        Write-Host "  deployMode=update -standard import (no staged upgrade)"
     } elseif ($isUpgrade -and -not $isRollback) {
-        # deployMode="upgrade" or unset — default to staged upgrade
+        # deployMode="upgrade" or unset -default to staged upgrade
         if ($solutionDeployMode -eq "upgrade") {
-            Write-Host "  deployMode=upgrade — using --stage-and-upgrade"
+            Write-Host "  deployMode=upgrade -using --stage-and-upgrade"
         }
         $importArgs += "--stage-and-upgrade"
         $importArgs += "--skip-lower-version"
@@ -445,7 +574,8 @@ foreach ($solution in $solutions) {
 
         try {
             # Find solution ID by unique name
-            $solQuery  = "$EnvironmentUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid"
+            $nameFilter = "uniquename eq '" + $name + "'"
+            $solQuery   = "$EnvironmentUrl/api/data/v9.2/solutions?`$filter=$nameFilter&`$select=solutionid"
             $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
             $solutionId = $solResult.value[0].solutionid
 
@@ -472,7 +602,7 @@ foreach ($solution in $solutions) {
                             continue
                         }
 
-                        Write-Host "    Flow '$($wf.name)' is off — activating..."
+                        Write-Host "    Flow '$($wf.name)' is off -activating..."
                         Invoke-RestMethod -Uri "$EnvironmentUrl/api/data/v9.2/workflows($wfId)" `
                             -Method Patch -Headers $apiHeaders -Body '{"statecode": 1}'
                         Write-Host "    Flow '$($wf.name)' activated."
@@ -503,7 +633,7 @@ if (-not $DryRun -and $buildConfig.PSObject.Properties["configData"] -and $build
     Write-Header "Upsert Config Data"
 
     if (-not $hasApiToken) {
-        Write-Host "WARNING: No Dataverse API token — skipping config data upsert."
+        Write-Host "WARNING: No Dataverse API token -skipping config data upsert."
     } else {
         $configData = @($buildConfig.configData)
         $syncScript = Join-Path $scriptsDir "Sync-ConfigData.ps1"
@@ -527,7 +657,7 @@ if (-not $DryRun -and $buildConfig.PSObject.Properties["configData"] -and $build
 # -----------------------------------------------------------------------------
 Write-Header "Deployment Summary"
 
-if ($DryRun) { Write-Host "  Mode: DRY RUN — no imports were performed" }
+if ($DryRun) { Write-Host "  Mode: DRY RUN -no imports were performed" }
 Write-Host "Environment:     $EnvironmentUrl"
 Write-Host "Subfolder:       $Subfolder"
 Write-Host "Settings key:    $SettingsKey"
@@ -555,9 +685,42 @@ if ($flowWarnings.Count -gt 0) {
 
 if ($failedSolutions.Count -gt 0) {
     Write-Host "Failed: $($failedSolutions -join ', ')"
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Release failed for '$Subfolder' → '$EnvironmentUrl'. Failed solutions: $($failedSolutions -join ', ').")
     Write-Error "One or more solutions failed to deploy."
     exit 1
 }
 
 Write-Host ""
 Write-Host "All solutions deployed successfully to: $EnvironmentUrl"
+
+$elapsed  = (Get-Date) - $startTime
+$duration = if ($elapsed.TotalHours -ge 1) { "{0}h {1}m {2}s" -f [int]$elapsed.TotalHours, $elapsed.Minutes, $elapsed.Seconds }
+            elseif ($elapsed.TotalMinutes -ge 1) { "{0}m {1}s" -f [int]$elapsed.TotalMinutes, $elapsed.Seconds }
+            else { "{0}s" -f [int]$elapsed.TotalSeconds }
+$solFacts = @(foreach ($sol in $solutions) {
+    $status = if ($failedSolutions  -contains $sol.name) { "✗" }
+              elseif ($skippedSolutions -contains $sol.name) { "—" }
+              else { "✓" }
+    @{ title = "$($sol.name)  v$($sol.version)"; value = $status }
+})
+Send-TeamsCard $notificationWebhookUrl @{
+    '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+    type    = "AdaptiveCard"
+    version = "1.4"
+    body    = @(
+        @{ type = "Container"; style = "good"; bleed = $true
+           items = @(@{ type = "TextBlock"; text = "$([char]0x2705)  Release Complete"; weight = "Bolder"; size = "Large" }) }
+        @{ type = "TextBlock"; text = "All solutions have been deployed successfully."; wrap = $true; spacing = "Medium" }
+        @{ type = "FactSet"; spacing = "Medium"
+           facts = @(
+               @{ title = "Build";    value = $Subfolder }
+               @{ title = "Target";   value = $EnvironmentUrl }
+               @{ title = "Stage";    value = $SettingsKey }
+               @{ title = "Deployed"; value = "$($deployedSolutions.Count)" }
+               @{ title = "Skipped";  value = "$($skippedSolutions.Count)" }
+               @{ title = "Duration"; value = $duration }
+           )}
+        @{ type = "TextBlock"; text = "**Solutions**"; weight = "Bolder"; spacing = "Medium" }
+        @{ type = "FactSet"; facts = $solFacts }
+    )
+}

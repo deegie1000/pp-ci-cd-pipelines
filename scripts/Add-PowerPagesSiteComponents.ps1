@@ -288,7 +288,10 @@ if ($newTableIds.Count -eq 0) {
             Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/RemoveSolutionComponent" -Method Post -Headers $ApiHeaders -Body $removeBody | Out-Null
             Write-Host "  Removed table component: $tableId"
         } catch {
-            Write-Host "##vso[task.logissue type=warning]Failed to remove table component ${tableId}: $($_.Exception.Message)"
+            $errDetail = $null
+            try { $errDetail = ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch {}
+            $errMsg = if ($errDetail) { $errDetail } else { $_.Exception.Message }
+            Write-Host "  WARNING: Could not remove table component $tableId from solution: $errMsg"
         }
     }
 }

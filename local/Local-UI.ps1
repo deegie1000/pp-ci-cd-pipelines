@@ -1,5 +1,5 @@
 # =============================================================================
-# Local-UI.ps1 -- Power Platform Local Runner (GUI)
+# Local-UI.ps1 -- Power Platform Local Pipelines (GUI)
 # =============================================================================
 # WinForms UI for Export-Solutions.ps1 and Deploy-Solutions.ps1.
 # Streams script output in near real-time and writes a log file to local/logs/.
@@ -11,6 +11,31 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# Compile a pure-.NET helper for process output capture.
+# PS script block event handlers don't execute while WinForms owns the thread (runspace is "busy").
+# C# lambdas run directly on the threadpool with no runspace involvement.
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+public static class ProcCapture {
+    public static void Wire(Process proc,
+                            ConcurrentQueue<string> outQ,
+                            ConcurrentQueue<string> errQ) {
+        proc.OutputDataReceived += (s, e) => { if (e.Data != null) outQ.Enqueue(e.Data); };
+        proc.ErrorDataReceived  += (s, e) => { if (e.Data != null) errQ.Enqueue(e.Data); };
+    }
+}
+public static class Win32 {
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    public static void SetRedraw(IntPtr hWnd, bool redraw) {
+        SendMessage(hWnd, 0x000B, new IntPtr(redraw ? 1 : 0), IntPtr.Zero);
+    }
+}
+"@
+
 $scriptDir  = $PSScriptRoot
 $logsDir    = Join-Path $scriptDir "logs"
 $configFile = Join-Path $scriptDir "local.config.json"
@@ -19,15 +44,24 @@ New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 # -----------------------------------------------------------------------------
 # Shared state
 # -----------------------------------------------------------------------------
-$script:runProcess         = $null
-$script:runningMode        = $null
-$script:outputQueue        = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-$script:errorQueue         = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-$script:processExited      = $false
-$script:exitCode           = 0
-$script:pendingDeployFile  = $null
-$script:pendingDeployArgs  = $null
-$script:logWriter          = $null
+$script:runProcess              = $null
+$script:runningMode             = $null
+$script:outputQueue             = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+$script:errorQueue              = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+$script:pendingDeployFile       = $null
+$script:pendingDeployArgs       = $null
+$script:logWriter               = $null
+$script:notificationWebhookUrl  = $null
+$script:countdownTimer          = $null
+$script:countdownSeconds        = 0
+$script:pendingExportScript     = $null
+$script:pendingDeployScript     = $null
+$script:pendingDevUrl           = $null
+$script:pendingTargetUrl        = $null
+$script:pendingKey              = $null
+$script:pendingSubfolder        = $null
+$script:pendingDryRun           = $false
+$script:pendingSkipTeams        = $false
 $script:configTargets      = @{}
 
 # -----------------------------------------------------------------------------
@@ -62,7 +96,8 @@ function Read-LocalConfig {
     if (Test-Path $configFile) {
         try {
             $cfg = Get-Content $configFile -Raw | ConvertFrom-Json
-            if ($cfg.devEnvironmentUrl) { $txtDevUrl.Text = $cfg.devEnvironmentUrl }
+            if ($cfg.devEnvironmentUrl)         { $txtDevUrl.Text = $cfg.devEnvironmentUrl }
+            if ($cfg.notificationWebhookUrl)    { $script:notificationWebhookUrl = $cfg.notificationWebhookUrl }
 
             # Reload targets first so we can restore the last selection
             Reload-Targets
@@ -92,7 +127,8 @@ function Save-LocalConfig {
         # Preserve existing targets array so we don't overwrite it
         if (Test-Path $configFile) {
             $existing = Get-Content $configFile -Raw | ConvertFrom-Json
-            if ($existing.targets) { $cfg["targets"] = $existing.targets }
+            if ($existing.targets)                  { $cfg["targets"]                 = $existing.targets }
+            if ($existing.notificationWebhookUrl)   { $cfg["notificationWebhookUrl"]  = $existing.notificationWebhookUrl }
         }
         $cfg | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
     } catch { }
@@ -142,7 +178,7 @@ function Get-LogStatus([string]$path) {
 # Form
 # =============================================================================
 $form               = New-Object System.Windows.Forms.Form
-$form.Text          = "Power Platform Local Runner"
+$form.Text          = "Power Platform Local Pipelines"
 $form.Size          = New-Object System.Drawing.Size(860, 800)
 $form.MinimumSize   = New-Object System.Drawing.Size(660, 640)
 $form.StartPosition = "CenterScreen"
@@ -264,13 +300,19 @@ $chkDryRun.Text     = "Dry Run - validate without deploying"
 $chkDryRun.Location = New-Object System.Drawing.Point($ix, 196)
 $chkDryRun.Size     = New-Object System.Drawing.Size(290, 22)
 
+$chkTeamsNotify          = New-Object System.Windows.Forms.CheckBox
+$chkTeamsNotify.Text     = "Send Teams Notifications"
+$chkTeamsNotify.Location = New-Object System.Drawing.Point(500, 196)
+$chkTeamsNotify.Size     = New-Object System.Drawing.Size(210, 22)
+$chkTeamsNotify.Checked  = $true
+
 $grpConfig.Controls.AddRange(@(
     $lblDevUrl, $txtDevUrl,
     $lblTarget, $cmbTarget, $btnRefreshTargets,
     $lblTargetUrl, $txtTargetUrl,
     $lblSettingsKey, $txtSettingsKey,
     $lblSubfolder, $cmbSubfolder, $btnRefresh,
-    $chkDryRun
+    $chkDryRun, $chkTeamsNotify
 ))
 
 # -----------------------------------------------------------------------------
@@ -444,18 +486,46 @@ $pollTimer          = New-Object System.Windows.Forms.Timer
 $pollTimer.Interval = 80
 
 $pollTimer.add_Tick({
-    $line = $null
-    while ($script:outputQueue.TryDequeue([ref]$line)) {
-        Append-Log $line (Get-LineColor $line)
-    }
-    while ($script:errorQueue.TryDequeue([ref]$line)) {
-        Append-Log $line ([System.Drawing.Color]::Crimson)
-    }
-    if ($logBox.TextLength -gt 0) { $logBox.ScrollToCaret() }
+    $line    = $null
+    $hasNew  = $false
 
-    if ($script:processExited) {
-        $script:processExited = $false
-        $code = $script:exitCode
+    [Win32]::SetRedraw($logBox.Handle, $false)
+    try {
+        while ($script:outputQueue.TryDequeue([ref]$line)) {
+            Append-Log $line (Get-LineColor $line)
+            $hasNew = $true
+        }
+        while ($script:errorQueue.TryDequeue([ref]$line)) {
+            Append-Log $line ([System.Drawing.Color]::Crimson)
+            $hasNew = $true
+        }
+    } finally {
+        [Win32]::SetRedraw($logBox.Handle, $true)
+    }
+    if ($hasNew) {
+        $logBox.Invalidate()
+        $logBox.ScrollToCaret()
+    }
+
+    # Check for process exit on the UI thread (avoids threading issues with PS5.1 event handlers)
+    if ($script:runProcess -ne $null -and $script:runProcess.HasExited) {
+        $code              = $script:runProcess.ExitCode
+        $script:runProcess = $null   # clear before any branching so we don't re-enter
+
+        # Final drain — async reads may have queued a few last lines
+        [Win32]::SetRedraw($logBox.Handle, $false)
+        try {
+            while ($script:outputQueue.TryDequeue([ref]$line)) {
+                Append-Log $line (Get-LineColor $line)
+            }
+            while ($script:errorQueue.TryDequeue([ref]$line)) {
+                Append-Log $line ([System.Drawing.Color]::Crimson)
+            }
+        } finally {
+            [Win32]::SetRedraw($logBox.Handle, $true)
+        }
+        $logBox.Invalidate()
+        $logBox.ScrollToCaret()
 
         if ($script:runningMode -eq "both-export") {
             if ($code -eq 0) {
@@ -649,8 +719,13 @@ function View-SelectedLog {
 }
 
 function Invoke-ScriptProcess([string]$scriptFile, [string[]]$scriptArgs) {
-    $psExe  = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-    $argStr = "-File `"$scriptFile`" " + ($scriptArgs -join " ")
+    $psExe = if ($PSVersionTable.PSVersion.Major -ge 6) {
+        Join-Path $PSHOME "pwsh.exe"
+    } else {
+        Join-Path $PSHOME "powershell.exe"
+    }
+
+    $argStr = "-ExecutionPolicy Bypass -File `"$scriptFile`" " + ($scriptArgs -join " ")
 
     $psi                        = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $psExe
@@ -664,25 +739,71 @@ function Invoke-ScriptProcess([string]$scriptFile, [string[]]$scriptArgs) {
     $proc.StartInfo           = $psi
     $proc.EnableRaisingEvents = $true
 
-    $proc.add_OutputDataReceived({
-        param($s, $e)
-        if ($null -ne $e.Data) { $script:outputQueue.Enqueue($e.Data) }
-    })
-    $proc.add_ErrorDataReceived({
-        param($s, $e)
-        if ($null -ne $e.Data) { $script:errorQueue.Enqueue($e.Data) }
-    })
-    $proc.add_Exited({
-        param($s, $e)
-        Start-Sleep -Milliseconds 150
-        $script:exitCode      = $s.ExitCode
-        $script:processExited = $true
-    })
+    # Use compiled C# lambdas — PS script block event handlers don't fire while
+    # WinForms owns the main thread (runspace is busy).
+    [ProcCapture]::Wire($proc, $script:outputQueue, $script:errorQueue)
 
     $proc.Start()            | Out-Null
     $proc.BeginOutputReadLine()
     $proc.BeginErrorReadLine()
     return $proc
+}
+
+function Send-TeamsNotification([object]$card) {
+    $url = $script:notificationWebhookUrl
+    if (-not $url) { return $false }
+    try {
+        $payload = [ordered]@{
+            type        = "message"
+            attachments = @([ordered]@{
+                contentType = "application/vnd.microsoft.card.adaptive"
+                contentUrl  = $null
+                content     = $card
+            })
+        } | ConvertTo-Json -Depth 20
+        $payload = [System.Text.RegularExpressions.Regex]::Replace($payload, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value[0] })
+        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json; charset=utf-8" -Body $bodyBytes -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        $errMsg = $null
+        try { $errMsg = ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch {}
+        if (-not $errMsg) { $errMsg = $_.Exception.Message }
+        Append-Log "Teams error: $errMsg" ([System.Drawing.Color]::OrangeRed)
+        return $false
+    }
+}
+
+function Invoke-Run {  # starts the actual subprocess(es) after any countdown delay
+    param(
+        [string]$exportScript, [string]$deployScript,
+        [string]$subfolder,    [string]$devUrl,
+        [string]$targetUrl,    [string]$key,
+        [bool]$dryRun,         [bool]$skipTeams
+    )
+    if ($rdoExport.Checked) {
+        $script:runningMode = "export"
+        $exportArgs = @("-EnvironmentUrl", $devUrl, "-Subfolder", $subfolder, "-SkipPrompts")
+        if ($skipTeams) { $exportArgs += "-SkipTeamsNotifications" }
+        $script:runProcess  = Invoke-ScriptProcess $exportScript $exportArgs
+    } elseif ($rdoDeploy.Checked) {
+        $script:runningMode = "deploy"
+        $deployArgs = @("-EnvironmentUrl", $targetUrl, "-Subfolder", $subfolder, "-SettingsKey", $key, "-SkipPrompts")
+        if ($dryRun)     { $deployArgs += "-DryRun" }
+        if ($skipTeams)  { $deployArgs += "-SkipTeamsNotifications" }
+        $script:runProcess  = Invoke-ScriptProcess $deployScript $deployArgs
+    } else {
+        $script:runningMode       = "both-export"
+        $script:pendingDeployFile = $deployScript
+        $script:pendingDeployArgs = @("-EnvironmentUrl", $targetUrl, "-Subfolder", $subfolder, "-SettingsKey", $key, "-SkipPrompts")
+        if ($dryRun)    { $script:pendingDeployArgs += "-DryRun" }
+        if ($skipTeams) { $script:pendingDeployArgs += "-SkipTeamsNotifications" }
+        Append-Log "--- Export phase ---" ([System.Drawing.Color]::DimGray)
+        Append-Log "" ([System.Drawing.Color]::Black)
+        $exportArgs = @("-EnvironmentUrl", $devUrl, "-Subfolder", $subfolder, "-SkipPrompts")
+        if ($skipTeams) { $exportArgs += "-SkipTeamsNotifications" }
+        $script:runProcess  = Invoke-ScriptProcess $exportScript $exportArgs
+    }
 }
 
 function Start-Run {
@@ -724,41 +845,74 @@ function Start-Run {
     $devUrl       = $txtDevUrl.Text.Trim()
     $targetUrl    = $txtTargetUrl.Text.Trim()
     $key          = if ($txtSettingsKey.Text.Trim()) { $txtSettingsKey.Text.Trim() } else { "Test" }
+    $dryRun       = $chkDryRun.Checked
+    $skipTeams    = -not $chkTeamsNotify.Checked
 
+    # Write the mode header now so it's visible during any countdown
     if ($rdoExport.Checked) {
-        $script:runningMode = "export"
         Append-Log "=== Export - $subfolder ===" ([System.Drawing.Color]::SteelBlue)
-        Append-Log "Log file: $logFile" ([System.Drawing.Color]::DimGray)
-        Append-Log "" ([System.Drawing.Color]::Black)
-        $script:runProcess = Invoke-ScriptProcess $exportScript @(
-            "-EnvironmentUrl", "`"$devUrl`"", "-Subfolder", "`"$subfolder`"", "-SkipPrompts"
-        )
-
     } elseif ($rdoDeploy.Checked) {
-        $script:runningMode = "deploy"
         Append-Log "=== Deploy - $subfolder -> $targetUrl ===" ([System.Drawing.Color]::SteelBlue)
-        Append-Log "Log file: $logFile" ([System.Drawing.Color]::DimGray)
-        Append-Log "" ([System.Drawing.Color]::Black)
-        $deployArgs = @("-EnvironmentUrl", "`"$targetUrl`"", "-Subfolder", "`"$subfolder`"",
-                        "-SettingsKey", "`"$key`"", "-SkipPrompts")
-        if ($chkDryRun.Checked) { $deployArgs += "-DryRun" }
-        $script:runProcess = Invoke-ScriptProcess $deployScript $deployArgs
-
     } else {
-        $script:runningMode       = "both-export"
-        $script:pendingDeployFile = $deployScript
-        $script:pendingDeployArgs = @("-EnvironmentUrl", "`"$targetUrl`"", "-Subfolder", "`"$subfolder`"",
-                                      "-SettingsKey", "`"$key`"", "-SkipPrompts")
-        if ($chkDryRun.Checked) { $script:pendingDeployArgs += "-DryRun" }
-
         Append-Log "=== Export + Deploy - $subfolder ===" ([System.Drawing.Color]::SteelBlue)
-        Append-Log "Log file: $logFile" ([System.Drawing.Color]::DimGray)
-        Append-Log "" ([System.Drawing.Color]::Black)
-        Append-Log "--- Export phase ---" ([System.Drawing.Color]::DimGray)
-        Append-Log "" ([System.Drawing.Color]::Black)
-        $script:runProcess = Invoke-ScriptProcess $exportScript @(
-            "-EnvironmentUrl", "`"$devUrl`"", "-Subfolder", "`"$subfolder`"", "-SkipPrompts"
-        )
+    }
+    Append-Log "Log file: $logFile" ([System.Drawing.Color]::DimGray)
+    Append-Log "" ([System.Drawing.Color]::Black)
+
+    # Capture args for countdown callback (timer Tick runs outside this scope)
+    $script:pendingExportScript = $exportScript
+    $script:pendingDeployScript = $deployScript
+    $script:pendingDevUrl       = $devUrl
+    $script:pendingTargetUrl    = $targetUrl
+    $script:pendingKey          = $key
+    $script:pendingSubfolder    = $subfolder
+    $script:pendingDryRun       = $dryRun
+    $script:pendingSkipTeams    = $skipTeams
+
+    # If export is involved and a webhook is configured, send card 1 + 2-minute countdown
+    $includesExport = $rdoExport.Checked -or $rdoBoth.Checked
+    if ($script:notificationWebhookUrl -and $includesExport -and -not $skipTeams) {
+        $notifOk = Send-TeamsNotification @{
+            '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+            type    = "AdaptiveCard"
+            version = "1.4"
+            body    = @(
+                @{ type = "Container"; style = "warning"; bleed = $true
+                   items = @(@{ type = "TextBlock"; text = "$([char]0x26A0)$([char]0xFE0F)  Code Freeze Starting"; weight = "Bolder"; size = "Large" }) }
+                @{ type = "TextBlock"; text = "Exports will begin in 2 minutes. Please finish any in-progress work in Dev."; wrap = $true; spacing = "Medium" }
+                @{ type = "FactSet"; spacing = "Medium"
+                   facts = @(
+                       @{ title = "Build"; value = $subfolder }
+                       @{ title = "Time";  value = (Get-Date -Format "M/d/yyyy h:mm tt") }
+                   )}
+            )
+        }
+        $script:countdownSeconds = 120
+        if ($notifOk) {
+            Append-Log "Teams notified. Exports begin in 2:00..." ([System.Drawing.Color]::DarkOrange)
+        } else {
+            Append-Log "WARNING: Teams notification failed. Exports begin in 2:00..." ([System.Drawing.Color]::OrangeRed)
+        }
+        $script:countdownTimer          = New-Object System.Windows.Forms.Timer
+        $script:countdownTimer.Interval = 30000
+        $script:countdownTimer.add_Tick({
+            $script:countdownSeconds -= 30
+            if ($script:countdownSeconds -le 0) {
+                $script:countdownTimer.Stop()
+                $script:countdownTimer.Dispose()
+                $script:countdownTimer = $null
+                Invoke-Run $script:pendingExportScript $script:pendingDeployScript `
+                           $script:pendingSubfolder $script:pendingDevUrl `
+                           $script:pendingTargetUrl $script:pendingKey $script:pendingDryRun $script:pendingSkipTeams
+            } else {
+                $m = [Math]::Floor($script:countdownSeconds / 60)
+                $s = $script:countdownSeconds % 60
+                Append-Log "Exports begin in $($m):$($s.ToString('D2'))..." ([System.Drawing.Color]::DarkOrange)
+            }
+        })
+        $script:countdownTimer.Start()
+    } else {
+        Invoke-Run $exportScript $deployScript $subfolder $devUrl $targetUrl $key $dryRun $skipTeams
     }
 }
 
@@ -771,6 +925,12 @@ function Complete-Run {
         $script:logWriter.WriteLine("Run completed at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - exit: $status")
         $script:logWriter.Close()
         $script:logWriter = $null
+    }
+
+    if ($script:countdownTimer) {
+        $script:countdownTimer.Stop()
+        $script:countdownTimer.Dispose()
+        $script:countdownTimer = $null
     }
 
     $script:runProcess        = $null
@@ -826,6 +986,11 @@ $btnStop.add_Click({
             Get-CimInstance Win32_Process -Filter "ParentProcessId = $procId" -ErrorAction SilentlyContinue |
                 ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         } catch { }
+    }
+    if ($script:countdownTimer) {
+        $script:countdownTimer.Stop()
+        $script:countdownTimer.Dispose()
+        $script:countdownTimer = $null
     }
     $script:processExited = $false
     $script:runningMode   = $null

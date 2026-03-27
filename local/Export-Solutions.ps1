@@ -12,7 +12,6 @@
 #
 # Prerequisites:
 #   - pac CLI installed (dotnet tool install --global Microsoft.PowerApps.CLI.Tool)
-#   - Az.Accounts PowerShell module (Install-Module Az.Accounts)
 # =============================================================================
 
 [CmdletBinding()]
@@ -25,7 +24,10 @@ param(
 
     # Suppresses interactive Read-Host prompts. Used by Local-UI.ps1 so the
     # subprocess does not block waiting for stdin.
-    [switch]$SkipPrompts
+    [switch]$SkipPrompts,
+
+    # When set, suppresses all Teams notifications regardless of local.config.json.
+    [switch]$SkipTeamsNotifications
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,15 +49,75 @@ function Assert-Command([string]$name) {
     }
 }
 
+# Acquire a Dataverse bearer token using the OAuth 2.0 device code flow.
+# No redirect URI or app registration required — prints a URL and code for the user to visit.
+function Get-DataverseToken([string]$environmentUrl) {
+    $clientId = "9cee029c-6210-4654-90bb-17e6e9d36617"  # Power Platform CLI
+
+    # Discover login base and tenant ID from the Dataverse 401 WWW-Authenticate header.
+    # This is more reliable than guessing from the environment URL because the Azure AD
+    # tenant may be in the public cloud even when the Dataverse org is in a government cloud.
+    $loginBase = "https://login.microsoftonline.com"
+    $tenant    = "organizations"
+    try {
+        $probe = Invoke-WebRequest -Uri "$environmentUrl/api/data/v9.2/" -UseBasicParsing -ErrorAction SilentlyContinue
+    } catch {
+        $probe = $_.Exception.Response
+    }
+    $wwwAuth = if ($probe -and $probe.Headers) {
+        try { $probe.Headers['WWW-Authenticate'] } catch { $null }
+    }
+    if ($wwwAuth -match 'authorization_uri="?(https://login\.[^/,"]+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
+        $loginBase = $Matches[1]
+        $tenant    = $Matches[2]
+        Write-Host "Discovered login: $loginBase, tenant: $tenant"
+    }
+
+    $scope = "$environmentUrl/.default"
+
+    # Request a device code
+    $dcResp = Invoke-RestMethod -Method Post `
+        -Uri "$loginBase/$tenant/oauth2/v2.0/devicecode" `
+        -ContentType "application/x-www-form-urlencoded" `
+        -Body "client_id=$clientId&scope=$([uri]::EscapeDataString($scope))"
+
+    $verifyUrl = if ($dcResp.verification_uri) { $dcResp.verification_uri } else { $dcResp.verification_url }
+    Write-Host ""
+    Write-Host "=== Dataverse Login ==="
+    Write-Host "Opening browser to: $verifyUrl"
+    Write-Host "Enter code: $($dcResp.user_code)"
+    Write-Host "======================="
+    Write-Host ""
+    Start-Process $verifyUrl
+
+    # Poll until the user completes sign-in or the code expires
+    $interval  = if ($dcResp.interval) { [int]$dcResp.interval } else { 5 }
+    $expiresAt = (Get-Date).AddSeconds([int]$dcResp.expires_in)
+
+    while ((Get-Date) -lt $expiresAt) {
+        Start-Sleep -Seconds $interval
+        try {
+            $tokResp = Invoke-RestMethod -Method Post `
+                -Uri "$loginBase/$tenant/oauth2/v2.0/token" `
+                -ContentType "application/x-www-form-urlencoded" `
+                -Body "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$clientId&device_code=$([uri]::EscapeDataString($dcResp.device_code))"
+            return $tokResp.access_token
+        } catch {
+            $errBody = $null
+            try { $errBody = ($_.ErrorDetails.Message | ConvertFrom-Json) } catch {}
+            $errCode = if ($errBody) { $errBody.error } else { $null }
+            if ($errCode -eq "authorization_pending") { continue }
+            if ($errCode -eq "slow_down") { $interval += 5; continue }
+            throw "Token error: $errCode - $($errBody.error_description)"
+        }
+    }
+    throw "Device code expired before authentication completed."
+}
+
 # -----------------------------------------------------------------------------
 # Prereq checks
 # -----------------------------------------------------------------------------
 Assert-Command "pac"
-
-if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
-    Write-Error "Az.Accounts module not found. Run: Install-Module Az.Accounts -Scope CurrentUser"
-    exit 1
-}
 
 # -----------------------------------------------------------------------------
 # Resolve repo root and local paths
@@ -73,6 +135,62 @@ New-Item -ItemType Directory -Path $unpackedDir  -Force | Out-Null
 New-Item -ItemType Directory -Path $managedDir   -Force | Out-Null
 
 # -----------------------------------------------------------------------------
+# Teams notifications (optional)
+# Reads notificationWebhookUrl from local.config.json if present.
+# -----------------------------------------------------------------------------
+$notificationWebhookUrl = $null
+$localConfigPath = Join-Path $localRoot "local.config.json"
+if (Test-Path $localConfigPath) {
+    try {
+        $lc = Get-Content $localConfigPath -Raw | ConvertFrom-Json
+        if ($lc.notificationWebhookUrl) { $notificationWebhookUrl = $lc.notificationWebhookUrl }
+    } catch {}
+}
+
+if ($SkipTeamsNotifications) { $notificationWebhookUrl = $null }
+
+$startTime = Get-Date
+
+function Send-TeamsCard([string]$webhookUrl, [object]$card) {
+    if (-not $webhookUrl) { return }
+    try {
+        $payload = [ordered]@{
+            type        = "message"
+            attachments = @([ordered]@{
+                contentType = "application/vnd.microsoft.card.adaptive"
+                contentUrl  = $null
+                content     = $card
+            })
+        } | ConvertTo-Json -Depth 20
+        $payload = [System.Text.RegularExpressions.Regex]::Replace($payload, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value[0] })
+        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        Invoke-RestMethod -Uri $webhookUrl -Method Post -ContentType "application/json; charset=utf-8" -Body $bodyBytes -ErrorAction Stop | Out-Null
+        Write-Host "Teams notification sent."
+    } catch {
+        Write-Host "WARNING: Teams notification failed: $($_.Exception.Message)"
+    }
+}
+
+function New-FailureCard([string]$message) {
+    @{
+        '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+        type    = "AdaptiveCard"
+        version = "1.4"
+        body    = @(
+            @{ type = "Container"; style = "attention"; bleed = $true
+               items = @(@{ type = "TextBlock"; text = "$([char]0x274C)  Export Failed"; weight = "Bolder"; size = "Large" }) }
+            @{ type = "TextBlock"; text = $message; wrap = $true; spacing = "Medium" }
+            @{ type = "FactSet"; spacing = "Medium"
+               facts = @(
+                   @{ title = "Build";  value = if ($Subfolder) { $Subfolder } else { "(not selected)" } }
+                   @{ title = "Source"; value = if ($EnvironmentUrl) { $EnvironmentUrl } else { "(not set)" } }
+                   @{ title = "Time";   value = (Get-Date -Format "M/d/yyyy h:mm tt") }
+               )}
+        )
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Prompt for environment URL if not supplied
 # -----------------------------------------------------------------------------
 if (-not $EnvironmentUrl) {
@@ -88,12 +206,14 @@ Write-Header "Select Export Subfolder"
 $subfolders = Get-ChildItem -Path $exportsRoot -Directory | Sort-Object Name
 
 if ($subfolders.Count -eq 0) {
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "No subfolders found in exports/. Create a subfolder with a build.json to continue.")
     Write-Error "No subfolders found in: $exportsRoot`nCreate a subfolder with a build.json to continue."
     exit 1
 }
 
 if ($Subfolder) {
     if (-not ($subfolders | Where-Object { $_.Name -eq $Subfolder })) {
+        Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Subfolder '$Subfolder' not found in exports/.")
         Write-Error "Subfolder '$Subfolder' not found in: $exportsRoot"
         exit 1
     }
@@ -126,6 +246,7 @@ Write-Host "Using subfolder: $Subfolder"
 Write-Header "Read build.json"
 
 if (-not (Test-Path $buildJsonPath)) {
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "build.json not found for subfolder '$Subfolder'.")
     Write-Error "build.json not found at: $buildJsonPath"
     exit 1
 }
@@ -134,7 +255,7 @@ $buildConfig = Get-Content $buildJsonPath -Raw | ConvertFrom-Json
 $solutions   = if ($buildConfig.solutions) { @($buildConfig.solutions) } else { @() }
 
 if ($solutions.Count -eq 0) {
-    Write-Host "No solutions in build.json — config data only run."
+    Write-Host "No solutions in build.json -config data only run."
 } else {
     Write-Host "Solutions to export ($($solutions.Count)):"
     foreach ($s in $solutions) {
@@ -150,6 +271,7 @@ if ($invalidSolutions.Count -gt 0) {
     foreach ($s in $invalidSolutions) {
         Write-Host "  Invalid: '$($s.name)' has isUnmanaged=true"
     }
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "build.json validation failed for '$Subfolder': isUnmanaged=true is not supported.")
     Write-Error "build.json validation failed: isUnmanaged=true is not supported."
     exit 1
 }
@@ -163,6 +285,7 @@ Write-Host "Authenticating with: $EnvironmentUrl"
 pac auth create --environment $EnvironmentUrl
 
 if ($LASTEXITCODE -ne 0) {
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Failed to authenticate with Power Platform (pac auth create).")
     Write-Error "Failed to authenticate with Power Platform"
     exit 1
 }
@@ -171,29 +294,14 @@ Write-Host "pac auth list:"
 pac auth list
 
 # -----------------------------------------------------------------------------
-# Connect Azure account for REST API token (flow activation, config data, Power Pages)
+# Acquire Dataverse REST API token (device code flow - no external modules)
 # -----------------------------------------------------------------------------
-Write-Header "Authenticate Azure (for Dataverse REST API)"
-
-$azContext = Get-AzContext -ErrorAction SilentlyContinue
-if (-not $azContext) {
-    Write-Host "No Azure context found — launching interactive login..."
-    Connect-AzAccount
-} else {
-    Write-Host "Already signed in as: $($azContext.Account.Id)"
-    if (-not $SkipPrompts) {
-        $confirm = Read-Host "Use this account? [Y/n]"
-        if ($confirm -eq "n" -or $confirm -eq "N") {
-            Connect-AzAccount
-        }
-    }
-}
-
-# Acquire Dataverse token
+$apiHeaders = $null
+Write-Header "Authenticate (Dataverse REST API)"
 try {
-    $tokenObj  = Get-AzAccessToken -ResourceUrl $EnvironmentUrl
+    $token = Get-DataverseToken $EnvironmentUrl
     $apiHeaders = @{
-        "Authorization"    = "Bearer $($tokenObj.Token)"
+        "Authorization"    = "Bearer $token"
         "OData-MaxVersion" = "4.0"
         "OData-Version"    = "4.0"
         "Content-Type"     = "application/json"
@@ -203,7 +311,23 @@ try {
 } catch {
     Write-Host "WARNING: Could not acquire Dataverse API token: $_"
     Write-Host "Power Pages site component population and cloud flow activation will be skipped."
-    $apiHeaders = $null
+}
+
+Send-TeamsCard $notificationWebhookUrl @{
+    '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+    type    = "AdaptiveCard"
+    version = "1.4"
+    body    = @(
+        @{ type = "Container"; style = "accent"; bleed = $true
+           items = @(@{ type = "TextBlock"; text = "$([System.Char]::ConvertFromUtf32(0x1F680))  Exports Starting"; weight = "Bolder"; size = "Large" }) }
+        @{ type = "TextBlock"; text = "Solution exports are now running."; wrap = $true; spacing = "Medium" }
+        @{ type = "FactSet"; spacing = "Medium"
+           facts = @(
+               @{ title = "Build";  value = $Subfolder }
+               @{ title = "Source"; value = $EnvironmentUrl }
+               @{ title = "Time";   value = (Get-Date -Format "M/d/yyyy h:mm tt") }
+           )}
+    )
 }
 
 # -----------------------------------------------------------------------------
@@ -226,7 +350,7 @@ if ($ppSolutions.Count -gt 0 -and $apiHeaders) {
         $sitesRaw     = $solution.powerPagesConfiguration.addAllExistingSiteComponentsForSites
         $siteNames    = @($sitesRaw -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-        Write-Host "Solution '$solutionName' — sites: $($siteNames -join ', ')"
+        Write-Host "Solution '$solutionName' -sites: $($siteNames -join ', ')"
 
         & $addScript `
             -SolutionUniqueName $solutionName `
@@ -235,12 +359,13 @@ if ($ppSolutions.Count -gt 0 -and $apiHeaders) {
             -ApiHeaders $apiHeaders
 
         if ($LASTEXITCODE -ne 0) {
+            Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Failed to add Power Pages site components for solution '$solutionName'.")
             Write-Error "Failed to add Power Pages site components for solution '$solutionName'."
             exit 1
         }
     }
 } elseif ($ppSolutions.Count -gt 0 -and -not $apiHeaders) {
-    Write-Host "WARNING: Power Pages solutions require a Dataverse API token — skipping site component population."
+    Write-Host "WARNING: Power Pages solutions require a Dataverse API token -skipping site component population."
 }
 
 # -----------------------------------------------------------------------------
@@ -263,20 +388,20 @@ foreach ($solution in $solutions) {
     # isExisting: use pre-existing managed zip, no export needed
     if ($solution.PSObject.Properties["isExisting"] -and $solution.isExisting -eq $true) {
         $existingZip = Join-Path $managedDir "${name}_${version}.zip"
-        Write-Host "  isExisting = true — using pre-existing managed zip."
+        Write-Host "  isExisting = true -using pre-existing managed zip."
         if (-not (Test-Path $existingZip)) {
             Write-Host "  ERROR: managed zip not found at: $existingZip"
             $failedSolutions += $name
             continue
         }
-        Write-Host "  Solution '$name' (v$version) — skipped export (isExisting=true)."
+        Write-Host "  Solution '$name' (v$version) -skipped export (isExisting=true)."
         continue
     }
 
     # Cached: managed zip already present for this name + version
     $existingManagedZip = Join-Path $managedDir "${name}_${version}.zip"
     if (Test-Path $existingManagedZip) {
-        Write-Host "  Managed zip already exists — using cached version."
+        Write-Host "  Managed zip already exists -using cached version."
 
         # Detect cloud flows from cached unpacked source
         $cachedUnpackDir    = Join-Path $unpackedDir $name
@@ -306,7 +431,7 @@ foreach ($solution in $solutions) {
         }
 
         $cachedSolutions += $name
-        Write-Host "  Solution '$name' (v$version) — cached, no re-export needed."
+        Write-Host "  Solution '$name' (v$version) -cached, no re-export needed."
         continue
     }
 
@@ -355,7 +480,7 @@ foreach ($solution in $solutions) {
             Write-Host "  No cloud flows in Workflows/"
         }
     } else {
-        Write-Host "  No Workflows/ directory — no cloud flows"
+        Write-Host "  No Workflows/ directory -no cloud flows"
     }
 
     # Validate version matches build.json
@@ -430,7 +555,7 @@ if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData.
     Write-Header "Extract Config Data from Dev"
 
     if (-not $apiHeaders) {
-        Write-Host "WARNING: No Dataverse API token — skipping config data extraction."
+        Write-Host "WARNING: No Dataverse API token -skipping config data extraction."
     } else {
         $configData = @($buildConfig.configData)
         $syncScript = Join-Path $scriptsDir "Sync-ConfigData.ps1"
@@ -446,12 +571,14 @@ if ($buildConfig.PSObject.Properties["configData"] -and $buildConfig.configData.
     }
 } else {
     Write-Host ""
-    Write-Host "No configData in build.json — skipping extraction."
+    Write-Host "No configData in build.json -skipping extraction."
 }
 
 # -----------------------------------------------------------------------------
 # Post-export version management (postExportVersion / createNewPatch)
-# Mirrors pipeline step 15. Runs after export; failures warn but do not stop.
+# Runs after export; failures warn but do not stop.
+# Default: patches the solution version in place (fast, no clone).
+# createNewPatch:true: uses CloneAsPatch instead (creates a new patch solution).
 # Skipped entirely if no solutions have postExportVersion defined.
 # Skipped per-solution if isExisting=true or isRollback=true.
 # -----------------------------------------------------------------------------
@@ -463,7 +590,7 @@ if ($postManaged.Count -gt 0) {
     Write-Header "Post-Export Version Management"
 
     if (-not $apiHeaders) {
-        Write-Host "WARNING: No Dataverse API token — skipping post-export version management."
+        Write-Host "WARNING: No Dataverse API token -skipping post-export version management."
     } else {
         $patchDisplayNamePrefix = "(DO NOT USE) "
         $postFailedUpdates      = @()
@@ -472,13 +599,13 @@ if ($postManaged.Count -gt 0) {
             $name = $solution.name
 
             if (-not $solution.PSObject.Properties["postExportVersion"] -or -not $solution.postExportVersion) {
-                Write-Host "Skipping '$name' — no postExportVersion defined."
+                Write-Host "Skipping '$name' -no postExportVersion defined."
                 continue
             }
 
             if ($solution.isExisting -eq $true -or $solution.isRollback -eq $true) {
                 $reason = if ($solution.isExisting -eq $true) { "isExisting=true" } else { "isRollback=true" }
-                Write-Host "Skipping '$name' — version management skipped ($reason)."
+                Write-Host "Skipping '$name' -version management skipped ($reason)."
                 continue
             }
 
@@ -488,17 +615,19 @@ if ($postManaged.Count -gt 0) {
                 $createNewPatch = [bool]$solution.createNewPatch
             }
 
-            if ($postVersion -eq $version) {
-                Write-Host "  Skipping '$name' — postExportVersion ($postVersion) is the same as version, no change needed."
+            if ($postVersion -eq $solution.version) {
+                Write-Host "  Skipping '$name' -postExportVersion ($postVersion) is the same as version, no change needed."
                 continue
             }
 
             Write-Host ""
-            Write-Host "  $name -> v$postVersion  (createNewPatch: $createNewPatch)"
+            $method = if ($createNewPatch) { "CloneAsPatch" } else { "version update" }
+            Write-Host "  $name -> v$postVersion  ($method)"
 
             # Query solution details (id, friendly name, parent)
             try {
-                $solQuery  = "$EnvironmentUrl/api/data/v9.2/solutions?`$filter=uniquename eq '$name'&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename,friendlyname)"
+                $nameFilter = "uniquename eq '" + $name + "'"
+                $solQuery  = "$EnvironmentUrl/api/data/v9.2/solutions?`$filter=$nameFilter&`$select=solutionid,friendlyname&`$expand=parentsolutionid(`$select=uniquename,friendlyname)"
                 $solResult = Invoke-RestMethod -Uri $solQuery -Headers $apiHeaders
                 $solRecord       = $solResult.value[0]
                 $friendlyName    = $solRecord.friendlyname
@@ -508,7 +637,7 @@ if ($postManaged.Count -gt 0) {
                 if ($isAPatch) {
                     $parentUniqueName   = $solRecord.parentsolutionid.uniquename
                     $parentFriendlyName = $solRecord.parentsolutionid.friendlyname
-                    Write-Host "  '$name' is a patch — parent: '$parentUniqueName'"
+                    Write-Host "  '$name' is a patch -parent: '$parentUniqueName'"
                 } else {
                     $parentUniqueName   = $name
                     $parentFriendlyName = $friendlyName
@@ -520,7 +649,7 @@ if ($postManaged.Count -gt 0) {
             }
 
             if ($createNewPatch) {
-                # CloneAsPatch — must target the parent (base) solution, not a patch
+                # CloneAsPatch -must target the parent (base) solution, not a patch
                 try {
                     $patchDisplayName = "$parentFriendlyName (PATCH)"
                     Write-Host "  Creating new patch from '$parentUniqueName' as '$patchDisplayName' at v$postVersion..."
@@ -543,36 +672,30 @@ if ($postManaged.Count -gt 0) {
                                 -Method Patch -Headers $apiHeaders -Body $renameBody | Out-Null
                             Write-Host "  Old patch renamed to: '$newDisplayName'"
                         } else {
-                            Write-Host "  Old patch already has prefix — skipping rename."
+                            Write-Host "  Old patch already has prefix -skipping rename."
                         }
                     }
                 } catch {
-                    Write-Host "  WARNING: Failed to create patch from '$name': $($_.Exception.Message)"
+                    $errDetail = $null
+                    try { $errDetail = ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch {}
+                    $msg = if ($errDetail) { $errDetail } else { $_.Exception.Message }
+                    Write-Host "  WARNING: Failed to create patch from '$name': $msg"
                     $postFailedUpdates += $name
                     continue
                 }
 
             } else {
-                # CloneAsSolution — if name is a patch, clone the parent instead
-                $targetName         = $parentUniqueName
-                $targetFriendlyName = $parentFriendlyName
-                if ($isAPatch) {
-                    Write-Host "  '$name' is a patch — cloning parent '$targetName' to v$postVersion..."
-                } else {
-                    Write-Host "  Cloning '$targetName' to v$postVersion..."
-                }
-
+                # Direct version update -patch the solution record in place
                 try {
-                    $cloneBody = @{
-                        ParentSolutionUniqueName = $targetName
-                        DisplayName              = $targetFriendlyName
-                        VersionNumber            = $postVersion
-                    } | ConvertTo-Json
-
-                    Invoke-RestMethod -Uri "$EnvironmentUrl/api/data/v9.2/CloneAsSolution" -Method Post -Headers $apiHeaders -Body $cloneBody
-                    Write-Host "  Solution cloned to v$postVersion."
+                    $patchBody = @{ version = $postVersion } | ConvertTo-Json
+                    Invoke-RestMethod -Uri "$EnvironmentUrl/api/data/v9.2/solutions($solutionId)" `
+                        -Method Patch -Headers $apiHeaders -Body $patchBody | Out-Null
+                    Write-Host "  Version updated to v$postVersion."
                 } catch {
-                    Write-Host "  WARNING: Failed to clone solution '$targetName': $($_.Exception.Message)"
+                    $errDetail = $null
+                    try { $errDetail = ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch {}
+                    $msg = if ($errDetail) { $errDetail } else { $_.Exception.Message }
+                    Write-Host "  WARNING: Failed to update version for '$name': $msg"
                     $postFailedUpdates += $name
                     continue
                 }
@@ -582,7 +705,7 @@ if ($postManaged.Count -gt 0) {
         if ($postFailedUpdates.Count -gt 0) {
             Write-Host ""
             Write-Host "WARNING: Post-export version management failed for: $($postFailedUpdates -join ', ')"
-            Write-Host "         Solutions were exported successfully — only the Dev version bump failed."
+            Write-Host "         Solutions were exported successfully -only the Dev version bump failed."
         } else {
             Write-Host ""
             Write-Host "Post-export version management complete."
@@ -608,6 +731,7 @@ if ($cachedSolutions.Count -gt 0) {
 
 if ($failedSolutions.Count -gt 0) {
     Write-Host "Failed: $($failedSolutions -join ', ')"
+    Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Export failed for '$Subfolder'. Failed solutions: $($failedSolutions -join ', ').")
     Write-Error "One or more solutions failed to process."
     exit 1
 }
@@ -617,3 +741,26 @@ Write-Host "Managed zips are in: $managedDir"
 Write-Host "Run Deploy-Solutions.ps1 to deploy to a target environment."
 Write-Host ""
 Write-Host "All solutions exported successfully."
+
+$elapsed   = (Get-Date) - $startTime
+$duration  = if ($elapsed.TotalHours -ge 1) { "{0}h {1}m {2}s" -f [int]$elapsed.TotalHours, $elapsed.Minutes, $elapsed.Seconds }
+             elseif ($elapsed.TotalMinutes -ge 1) { "{0}m {1}s" -f [int]$elapsed.TotalMinutes, $elapsed.Seconds }
+             else { "{0}s" -f [int]$elapsed.TotalSeconds }
+$expCount  = $solutions.Count - $failedSolutions.Count - $cachedSolutions.Count
+Send-TeamsCard $notificationWebhookUrl @{
+    '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+    type    = "AdaptiveCard"
+    version = "1.4"
+    body    = @(
+        @{ type = "Container"; style = "good"; bleed = $true
+           items = @(@{ type = "TextBlock"; text = "$([char]0x2705)  Exports Complete"; weight = "Bolder"; size = "Large" }) }
+        @{ type = "TextBlock"; text = "Code freeze is over. Solutions have been exported successfully."; wrap = $true; spacing = "Medium" }
+        @{ type = "FactSet"; spacing = "Medium"
+           facts = @(
+               @{ title = "Build";    value = $Subfolder }
+               @{ title = "Exported"; value = "$expCount" }
+               @{ title = "Cached";   value = "$($cachedSolutions.Count)" }
+               @{ title = "Duration"; value = $duration }
+           )}
+    )
+}
