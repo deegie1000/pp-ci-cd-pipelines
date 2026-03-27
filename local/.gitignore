@@ -8,3 +8,5 @@ exports/*
 
 deploymentSettings/*
 !deploymentSettings/deploymentSettings_sample.json
+
+ui-tests/*
