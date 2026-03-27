@@ -52,17 +52,7 @@ $script:pendingDeployFile       = $null
 $script:pendingDeployArgs       = $null
 $script:logWriter               = $null
 $script:notificationWebhookUrl  = $null
-$script:countdownTimer          = $null
-$script:countdownSeconds        = 0
-$script:pendingExportScript     = $null
-$script:pendingDeployScript     = $null
-$script:pendingDevUrl           = $null
-$script:pendingTargetUrl        = $null
-$script:pendingKey              = $null
-$script:pendingSubfolder        = $null
-$script:pendingDryRun           = $false
-$script:pendingSkipTeams        = $false
-$script:configTargets      = @{}
+$script:configTargets           = @{}
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -859,61 +849,7 @@ function Start-Run {
     Append-Log "Log file: $logFile" ([System.Drawing.Color]::DimGray)
     Append-Log "" ([System.Drawing.Color]::Black)
 
-    # Capture args for countdown callback (timer Tick runs outside this scope)
-    $script:pendingExportScript = $exportScript
-    $script:pendingDeployScript = $deployScript
-    $script:pendingDevUrl       = $devUrl
-    $script:pendingTargetUrl    = $targetUrl
-    $script:pendingKey          = $key
-    $script:pendingSubfolder    = $subfolder
-    $script:pendingDryRun       = $dryRun
-    $script:pendingSkipTeams    = $skipTeams
-
-    # If export is involved and a webhook is configured, send card 1 + 2-minute countdown
-    $includesExport = $rdoExport.Checked -or $rdoBoth.Checked
-    if ($script:notificationWebhookUrl -and $includesExport -and -not $skipTeams) {
-        $notifOk = Send-TeamsNotification @{
-            '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
-            type    = "AdaptiveCard"
-            version = "1.4"
-            body    = @(
-                @{ type = "Container"; style = "warning"; bleed = $true
-                   items = @(@{ type = "TextBlock"; text = "$([char]0x26A0)$([char]0xFE0F)  Code Freeze Starting"; weight = "Bolder"; size = "Large" }) }
-                @{ type = "TextBlock"; text = "Exports will begin in 2 minutes. Please finish any in-progress work in Dev."; wrap = $true; spacing = "Medium" }
-                @{ type = "FactSet"; spacing = "Medium"
-                   facts = @(
-                       @{ title = "Build"; value = $subfolder }
-                       @{ title = "Time";  value = (Get-Date -Format "M/d/yyyy h:mm tt") }
-                   )}
-            )
-        }
-        $script:countdownSeconds = 120
-        if ($notifOk) {
-            Append-Log "Teams notified. Exports begin in 2:00..." ([System.Drawing.Color]::DarkOrange)
-        } else {
-            Append-Log "WARNING: Teams notification failed. Exports begin in 2:00..." ([System.Drawing.Color]::OrangeRed)
-        }
-        $script:countdownTimer          = New-Object System.Windows.Forms.Timer
-        $script:countdownTimer.Interval = 30000
-        $script:countdownTimer.add_Tick({
-            $script:countdownSeconds -= 30
-            if ($script:countdownSeconds -le 0) {
-                $script:countdownTimer.Stop()
-                $script:countdownTimer.Dispose()
-                $script:countdownTimer = $null
-                Invoke-Run $script:pendingExportScript $script:pendingDeployScript `
-                           $script:pendingSubfolder $script:pendingDevUrl `
-                           $script:pendingTargetUrl $script:pendingKey $script:pendingDryRun $script:pendingSkipTeams
-            } else {
-                $m = [Math]::Floor($script:countdownSeconds / 60)
-                $s = $script:countdownSeconds % 60
-                Append-Log "Exports begin in $($m):$($s.ToString('D2'))..." ([System.Drawing.Color]::DarkOrange)
-            }
-        })
-        $script:countdownTimer.Start()
-    } else {
-        Invoke-Run $exportScript $deployScript $subfolder $devUrl $targetUrl $key $dryRun $skipTeams
-    }
+    Invoke-Run $exportScript $deployScript $subfolder $devUrl $targetUrl $key $dryRun $skipTeams
 }
 
 function Complete-Run {
@@ -925,12 +861,6 @@ function Complete-Run {
         $script:logWriter.WriteLine("Run completed at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - exit: $status")
         $script:logWriter.Close()
         $script:logWriter = $null
-    }
-
-    if ($script:countdownTimer) {
-        $script:countdownTimer.Stop()
-        $script:countdownTimer.Dispose()
-        $script:countdownTimer = $null
     }
 
     $script:runProcess        = $null
@@ -986,11 +916,6 @@ $btnStop.add_Click({
             Get-CimInstance Win32_Process -Filter "ParentProcessId = $procId" -ErrorAction SilentlyContinue |
                 ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         } catch { }
-    }
-    if ($script:countdownTimer) {
-        $script:countdownTimer.Stop()
-        $script:countdownTimer.Dispose()
-        $script:countdownTimer = $null
     }
     $script:processExited = $false
     $script:runningMode   = $null

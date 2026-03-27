@@ -313,6 +313,36 @@ try {
     Write-Host "Power Pages site component population and cloud flow activation will be skipped."
 }
 
+# Code Freeze notification + 2-minute countdown (fires after auth so we know credentials work)
+if ($notificationWebhookUrl) {
+    Send-TeamsCard $notificationWebhookUrl @{
+        '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+        type    = "AdaptiveCard"
+        version = "1.4"
+        body    = @(
+            @{ type = "Container"; style = "warning"; bleed = $true
+               items = @(@{ type = "TextBlock"; text = "$([char]0x26A0)$([char]0xFE0F)  Code Freeze Starting"; weight = "Bolder"; size = "Large" }) }
+            @{ type = "TextBlock"; text = "Exports will begin in 2 minutes. Please finish any in-progress work in Dev."; wrap = $true; spacing = "Medium" }
+            @{ type = "FactSet"; spacing = "Medium"
+               facts = @(
+                   @{ title = "Build"; value = $Subfolder }
+                   @{ title = "Time";  value = (Get-Date -Format "M/d/yyyy h:mm tt") }
+               )}
+        )
+    }
+    Write-Host "Teams notified. Exports begin in 2:00..."
+    $remaining = 120
+    while ($remaining -gt 0) {
+        Start-Sleep -Seconds 30
+        $remaining -= 30
+        if ($remaining -gt 0) {
+            $m = [Math]::Floor($remaining / 60)
+            $s = $remaining % 60
+            Write-Host "Exports begin in $($m):$($s.ToString('D2'))..."
+        }
+    }
+}
+
 Send-TeamsCard $notificationWebhookUrl @{
     '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
     type    = "AdaptiveCard"
