@@ -54,9 +54,27 @@ function Assert-Command([string]$name) {
 }
 
 # Acquire a Dataverse bearer token using the OAuth 2.0 device code flow.
-# No redirect URI or app registration required — prints a URL and code for the user to visit.
+# Tokens are cached in a temp file for up to 50 minutes to avoid re-prompting
+# across sequential runs (e.g. Export then Deploy in the same session).
 function Get-DataverseToken([string]$environmentUrl) {
-    $clientId = "9cee029c-6210-4654-90bb-17e6e9d36617"  # Power Platform CLI
+    $clientId  = "9cee029c-6210-4654-90bb-17e6e9d36617"  # Power Platform CLI
+    $cacheFile = Join-Path $env:TEMP "pp_cicd_dvtokens.json"
+    $cacheKey  = $environmentUrl.TrimEnd("/").ToLower()
+
+    # Check cache first
+    if (Test-Path $cacheFile) {
+        try {
+            $cache = Get-Content $cacheFile -Raw | ConvertFrom-Json
+            $entry = $cache.PSObject.Properties[$cacheKey]
+            if ($entry) {
+                $ageMin = ((Get-Date) - [datetime]$entry.Value.acquiredAt).TotalMinutes
+                if ($ageMin -lt 50) {
+                    Write-Host "Using cached Dataverse API token (acquired $([int]$ageMin)m ago)."
+                    return $entry.Value.token
+                }
+            }
+        } catch { }
+    }
 
     # Discover login base and tenant ID from the Dataverse 401 WWW-Authenticate header.
     # This is more reliable than guessing from the environment URL because the Azure AD
@@ -98,6 +116,7 @@ function Get-DataverseToken([string]$environmentUrl) {
     $interval  = if ($dcResp.interval) { [int]$dcResp.interval } else { 5 }
     $expiresAt = (Get-Date).AddSeconds([int]$dcResp.expires_in)
 
+    $token = $null
     while ((Get-Date) -lt $expiresAt) {
         Start-Sleep -Seconds $interval
         try {
@@ -105,7 +124,8 @@ function Get-DataverseToken([string]$environmentUrl) {
                 -Uri "$loginBase/$tenant/oauth2/v2.0/token" `
                 -ContentType "application/x-www-form-urlencoded" `
                 -Body "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$clientId&device_code=$([uri]::EscapeDataString($dcResp.device_code))"
-            return $tokResp.access_token
+            $token = $tokResp.access_token
+            break
         } catch {
             $errBody = $null
             try { $errBody = ($_.ErrorDetails.Message | ConvertFrom-Json) } catch {}
@@ -115,7 +135,21 @@ function Get-DataverseToken([string]$environmentUrl) {
             throw "Token error: $errCode - $($errBody.error_description)"
         }
     }
-    throw "Device code expired before authentication completed."
+    if (-not $token) { throw "Device code expired before authentication completed." }
+
+    # Save token to cache
+    try {
+        $cache = if (Test-Path $cacheFile) {
+            try { Get-Content $cacheFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{} }
+        } else { [PSCustomObject]@{} }
+        $cache | Add-Member -NotePropertyName $cacheKey -NotePropertyValue ([PSCustomObject]@{
+            token      = $token
+            acquiredAt = (Get-Date).ToString("o")
+        }) -Force
+        $cache | ConvertTo-Json | Set-Content $cacheFile -Encoding UTF8
+    } catch { }
+
+    return $token
 }
 
 # -----------------------------------------------------------------------------
@@ -544,12 +578,20 @@ foreach ($solution in $solutions) {
     } elseif ($solutionDeployMode -eq "update") {
         Write-Host "  deployMode=update -standard import (no staged upgrade)"
     } elseif ($isUpgrade -and -not $isRollback) {
-        # deployMode="upgrade" or unset -default to staged upgrade
-        if ($solutionDeployMode -eq "upgrade") {
-            Write-Host "  deployMode=upgrade -using --stage-and-upgrade"
+        # deployMode="upgrade" or unset -default to staged upgrade.
+        # If a patch of this solution is already installed, --stage-and-upgrade is rejected
+        # by Dataverse. Detect and use the two-step holding pattern automatically.
+        $hasPatch = @($installed.Keys | Where-Object { $_ -like "${name}_Patch_*" }).Count -gt 0
+        if ($hasPatch) {
+            Write-Host "  Patch detected on target -using holding pattern (--import-as-holding + pac solution upgrade)"
+            $importArgs += "--import-as-holding"
+        } else {
+            if ($solutionDeployMode -eq "upgrade") {
+                Write-Host "  deployMode=upgrade -using --stage-and-upgrade"
+            }
+            $importArgs += "--stage-and-upgrade"
+            $importArgs += "--skip-lower-version"
         }
-        $importArgs += "--stage-and-upgrade"
-        $importArgs += "--skip-lower-version"
     }
 
     # Deployment settings
@@ -574,8 +616,23 @@ foreach ($solution in $solutions) {
 
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  ERROR: Failed to import solution: $name"
-            $failedSolutions += $name
-            continue
+            Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Release failed for '$Subfolder' → '$EnvironmentUrl'. Failed to import solution: $name.")
+            Write-Error "Failed to import solution: $name. Aborting release."
+            exit 1
+        }
+
+        # Second step of the holding pattern: apply the staged upgrade
+        if ($importArgs -contains "--import-as-holding") {
+            Write-Host "  Applying staged upgrade..."
+            pac solution upgrade --solution-name $name --async --max-async-wait-time 60
+
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  ERROR: Failed to apply upgrade for solution: $name"
+                Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Release failed for '$Subfolder' → '$EnvironmentUrl'. Failed to apply upgrade for solution: $name.")
+                Write-Error "Failed to apply upgrade for solution: $name. Aborting release."
+                exit 1
+            }
+            Write-Host "  Upgrade applied."
         }
 
         Write-Host "  Successfully deployed."
@@ -738,24 +795,31 @@ $solFacts = @(foreach ($sol in $solutions) {
               else { [char]0x2713 }
     @{ title = "$($sol.name)  v$($sol.version)"; value = $status }
 })
+$releaseCardBody = [System.Collections.Generic.List[object]]::new()
+$releaseCardBody.Add(@{ type = "Container"; style = "good"; bleed = $true
+                        items = @(@{ type = "TextBlock"; text = "$([char]0x2705)  Release Complete"; weight = "Bolder"; size = "Large" }) })
+$releaseCardBody.Add(@{ type = "TextBlock"; text = "All solutions have been deployed successfully."; wrap = $true; spacing = "Medium" })
+$releaseCardBody.Add(@{ type = "FactSet"; spacing = "Medium"
+                        facts = @(
+                            @{ title = "Build";    value = $Subfolder }
+                            @{ title = "Target";   value = $EnvironmentUrl }
+                            @{ title = "Stage";    value = $SettingsKey }
+                            @{ title = "Deployed"; value = "$($deployedSolutions.Count)" }
+                            @{ title = "Skipped";  value = "$($skippedSolutions.Count)" }
+                            @{ title = "Duration"; value = $duration }
+                        )})
+$releaseCardBody.Add(@{ type = "TextBlock"; text = "**Solutions**"; weight = "Bolder"; spacing = "Medium" })
+$releaseCardBody.Add(@{ type = "FactSet"; facts = $solFacts })
+if ($flowWarnings.Count -gt 0) {
+    $flowFacts = @($flowWarnings | ForEach-Object { @{ title = "[$($_.Solution)] $($_.Flow)"; value = $_.Error } })
+    $releaseCardBody.Add(@{ type = "TextBlock"
+                            text = "$([char]0x26A0)$([char]0xFE0F)  Cloud Flows Not Activated ($($flowWarnings.Count))"
+                            weight = "Bolder"; color = "Warning"; spacing = "Medium" })
+    $releaseCardBody.Add(@{ type = "FactSet"; facts = $flowFacts })
+}
 Send-TeamsCard $notificationWebhookUrl @{
     '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
     type    = "AdaptiveCard"
     version = "1.4"
-    body    = @(
-        @{ type = "Container"; style = "good"; bleed = $true
-           items = @(@{ type = "TextBlock"; text = "$([char]0x2705)  Release Complete"; weight = "Bolder"; size = "Large" }) }
-        @{ type = "TextBlock"; text = "All solutions have been deployed successfully."; wrap = $true; spacing = "Medium" }
-        @{ type = "FactSet"; spacing = "Medium"
-           facts = @(
-               @{ title = "Build";    value = $Subfolder }
-               @{ title = "Target";   value = $EnvironmentUrl }
-               @{ title = "Stage";    value = $SettingsKey }
-               @{ title = "Deployed"; value = "$($deployedSolutions.Count)" }
-               @{ title = "Skipped";  value = "$($skippedSolutions.Count)" }
-               @{ title = "Duration"; value = $duration }
-           )}
-        @{ type = "TextBlock"; text = "**Solutions**"; weight = "Bolder"; spacing = "Medium" }
-        @{ type = "FactSet"; facts = $solFacts }
-    )
+    body    = $releaseCardBody.ToArray()
 }

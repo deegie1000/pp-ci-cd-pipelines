@@ -118,22 +118,33 @@ $targetSolutionId = $targetSolution.solutionid
 Write-Host "  Found: $($targetSolution.friendlyname) [$SolutionUniqueName] ($targetSolutionId)"
 
 # ---------------------------------------------------------------
-# 3. Snapshot existing table components (Entity type 1) before
-#    any changes — used to identify inadvertently added tables
+# 3. Snapshot existing table and cloud flow components before
+#    any changes — used to identify inadvertently added ones
 # ---------------------------------------------------------------
-$tableComponentType = 1
+$tableComponentType    = 1
+$workflowComponentType = 29
+
 $tableSnapshotUrl = "$envUrl/api/data/v9.2/solutioncomponents" +
                     "?`$select=objectid" +
                     "&`$filter=_solutionid_value eq $targetSolutionId and componenttype eq $tableComponentType"
 
-$existingTableIds = @(Invoke-ODataPagedQuery -Uri $tableSnapshotUrl -Headers $ApiHeaders |
-                      ForEach-Object { $_.objectid })
 $existingTableSet = [System.Collections.Generic.HashSet[string]]::new(
-    [string[]]$existingTableIds,
+    [string[]]@(Invoke-ODataPagedQuery -Uri $tableSnapshotUrl -Headers $ApiHeaders | ForEach-Object { $_.objectid }),
     [System.StringComparer]::OrdinalIgnoreCase
 )
+
+$flowSnapshotUrl = "$envUrl/api/data/v9.2/solutioncomponents" +
+                   "?`$select=objectid" +
+                   "&`$filter=_solutionid_value eq $targetSolutionId and componenttype eq $workflowComponentType"
+
+$existingFlowSet = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@(Invoke-ODataPagedQuery -Uri $flowSnapshotUrl -Headers $ApiHeaders | ForEach-Object { $_.objectid }),
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+
 Write-Host ""
 Write-Host "  Pre-existing table components in solution: $($existingTableSet.Count)"
+Write-Host "  Pre-existing cloud flow components in solution: $($existingFlowSet.Count)"
 
 # ---------------------------------------------------------------
 # 4. Process each site
@@ -258,40 +269,62 @@ foreach ($siteName in $SiteNames) {
 }
 
 # ---------------------------------------------------------------
-# 5. Cleanup: remove any table components added inadvertently
-#    (i.e., present now but not in the pre-run snapshot)
+# 5. Cleanup: remove any table or cloud flow components added
+#    inadvertently (i.e., present now but not in the pre-run snapshot)
 # ---------------------------------------------------------------
 Write-Host ""
 Write-Host "--------------------------------------------"
-Write-Host "  Cleanup: checking for inadvertently added table components"
+Write-Host "  Cleanup: checking for inadvertently added table and cloud flow components"
 Write-Host "--------------------------------------------"
 
+# --- Table components ---
 $currentTableUrl = "$envUrl/api/data/v9.2/solutioncomponents" +
                    "?`$select=objectid" +
                    "&`$filter=_solutionid_value eq $targetSolutionId and componenttype eq $tableComponentType"
-$currentTableIds = @(Invoke-ODataPagedQuery -Uri $currentTableUrl -Headers $ApiHeaders |
-                     ForEach-Object { $_.objectid })
-$newTableIds = @($currentTableIds | Where-Object { -not $existingTableSet.Contains($_) })
+$newTableIds = @(Invoke-ODataPagedQuery -Uri $currentTableUrl -Headers $ApiHeaders |
+                 ForEach-Object { $_.objectid } |
+                 Where-Object { -not $existingTableSet.Contains($_) })
 
 if ($newTableIds.Count -eq 0) {
     Write-Host "  No new table components found - no cleanup needed."
 } else {
     Write-Host "  Removing $($newTableIds.Count) inadvertently added table component(s)..."
     foreach ($tableId in $newTableIds) {
-        $removeBody = @{
-            ComponentId        = $tableId
-            ComponentType      = $tableComponentType
-            SolutionUniqueName = $SolutionUniqueName
-        } | ConvertTo-Json -Compress
-
-        try {
-            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/RemoveSolutionComponent" -Method Post -Headers $ApiHeaders -Body $removeBody | Out-Null
+        pac solution remove-solution-component `
+            --environment $envUrl `
+            --solution-name $SolutionUniqueName `
+            --component-id $tableId `
+            --component-type $tableComponentType
+        if ($LASTEXITCODE -eq 0) {
             Write-Host "  Removed table component: $tableId"
-        } catch {
-            $errDetail = $null
-            try { $errDetail = ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch {}
-            $errMsg = if ($errDetail) { $errDetail } else { $_.Exception.Message }
-            Write-Host "  WARNING: Could not remove table component $tableId from solution: $errMsg"
+        } else {
+            Write-Host "  WARNING: Could not remove table component $tableId from solution."
+        }
+    }
+}
+
+# --- Cloud flow components ---
+$currentFlowUrl = "$envUrl/api/data/v9.2/solutioncomponents" +
+                  "?`$select=objectid" +
+                  "&`$filter=_solutionid_value eq $targetSolutionId and componenttype eq $workflowComponentType"
+$newFlowIds = @(Invoke-ODataPagedQuery -Uri $currentFlowUrl -Headers $ApiHeaders |
+                ForEach-Object { $_.objectid } |
+                Where-Object { -not $existingFlowSet.Contains($_) })
+
+if ($newFlowIds.Count -eq 0) {
+    Write-Host "  No new cloud flow components found - no cleanup needed."
+} else {
+    Write-Host "  Removing $($newFlowIds.Count) inadvertently added cloud flow component(s)..."
+    foreach ($flowId in $newFlowIds) {
+        pac solution remove-solution-component `
+            --environment $envUrl `
+            --solution-name $SolutionUniqueName `
+            --component-id $flowId `
+            --component-type $workflowComponentType
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Removed cloud flow component: $flowId"
+        } else {
+            Write-Host "  WARNING: Could not remove cloud flow component $flowId from solution."
         }
     }
 }

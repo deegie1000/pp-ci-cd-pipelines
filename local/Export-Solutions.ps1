@@ -50,9 +50,27 @@ function Assert-Command([string]$name) {
 }
 
 # Acquire a Dataverse bearer token using the OAuth 2.0 device code flow.
-# No redirect URI or app registration required — prints a URL and code for the user to visit.
+# Tokens are cached in a temp file for up to 50 minutes to avoid re-prompting
+# across sequential runs (e.g. Export then Deploy in the same session).
 function Get-DataverseToken([string]$environmentUrl) {
-    $clientId = "9cee029c-6210-4654-90bb-17e6e9d36617"  # Power Platform CLI
+    $clientId  = "9cee029c-6210-4654-90bb-17e6e9d36617"  # Power Platform CLI
+    $cacheFile = Join-Path $env:TEMP "pp_cicd_dvtokens.json"
+    $cacheKey  = $environmentUrl.TrimEnd("/").ToLower()
+
+    # Check cache first
+    if (Test-Path $cacheFile) {
+        try {
+            $cache = Get-Content $cacheFile -Raw | ConvertFrom-Json
+            $entry = $cache.PSObject.Properties[$cacheKey]
+            if ($entry) {
+                $ageMin = ((Get-Date) - [datetime]$entry.Value.acquiredAt).TotalMinutes
+                if ($ageMin -lt 50) {
+                    Write-Host "Using cached Dataverse API token (acquired $([int]$ageMin)m ago)."
+                    return $entry.Value.token
+                }
+            }
+        } catch { }
+    }
 
     # Discover login base and tenant ID from the Dataverse 401 WWW-Authenticate header.
     # This is more reliable than guessing from the environment URL because the Azure AD
@@ -94,6 +112,7 @@ function Get-DataverseToken([string]$environmentUrl) {
     $interval  = if ($dcResp.interval) { [int]$dcResp.interval } else { 5 }
     $expiresAt = (Get-Date).AddSeconds([int]$dcResp.expires_in)
 
+    $token = $null
     while ((Get-Date) -lt $expiresAt) {
         Start-Sleep -Seconds $interval
         try {
@@ -101,7 +120,8 @@ function Get-DataverseToken([string]$environmentUrl) {
                 -Uri "$loginBase/$tenant/oauth2/v2.0/token" `
                 -ContentType "application/x-www-form-urlencoded" `
                 -Body "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$clientId&device_code=$([uri]::EscapeDataString($dcResp.device_code))"
-            return $tokResp.access_token
+            $token = $tokResp.access_token
+            break
         } catch {
             $errBody = $null
             try { $errBody = ($_.ErrorDetails.Message | ConvertFrom-Json) } catch {}
@@ -111,7 +131,21 @@ function Get-DataverseToken([string]$environmentUrl) {
             throw "Token error: $errCode - $($errBody.error_description)"
         }
     }
-    throw "Device code expired before authentication completed."
+    if (-not $token) { throw "Device code expired before authentication completed." }
+
+    # Save token to cache
+    try {
+        $cache = if (Test-Path $cacheFile) {
+            try { Get-Content $cacheFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{} }
+        } else { [PSCustomObject]@{} }
+        $cache | Add-Member -NotePropertyName $cacheKey -NotePropertyValue ([PSCustomObject]@{
+            token      = $token
+            acquiredAt = (Get-Date).ToString("o")
+        }) -Force
+        $cache | ConvertTo-Json | Set-Content $cacheFile -Encoding UTF8
+    } catch { }
+
+    return $token
 }
 
 # -----------------------------------------------------------------------------
