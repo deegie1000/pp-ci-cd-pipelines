@@ -188,7 +188,7 @@ $rdoExport          = New-Object System.Windows.Forms.RadioButton
 $rdoExport.Text     = "Export only"
 $rdoExport.Location = New-Object System.Drawing.Point(12, 22)
 $rdoExport.Size     = New-Object System.Drawing.Size(140, 22)
-$rdoExport.Checked  = $true
+$rdoExport.Checked  = $false
 
 $rdoDeploy          = New-Object System.Windows.Forms.RadioButton
 $rdoDeploy.Text     = "Deploy only"
@@ -199,6 +199,7 @@ $rdoBoth            = New-Object System.Windows.Forms.RadioButton
 $rdoBoth.Text       = "Export + Deploy"
 $rdoBoth.Location   = New-Object System.Drawing.Point(324, 22)
 $rdoBoth.Size       = New-Object System.Drawing.Size(160, 22)
+$rdoBoth.Checked    = $true
 
 $grpMode.Controls.AddRange(@($rdoExport, $rdoDeploy, $rdoBoth))
 

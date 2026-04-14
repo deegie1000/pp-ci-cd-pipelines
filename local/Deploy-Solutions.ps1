@@ -577,18 +577,28 @@ foreach ($solution in $solutions) {
         }
     } elseif ($solutionDeployMode -eq "update") {
         Write-Host "  deployMode=update -standard import (no staged upgrade)"
-    } elseif ($isUpgrade -and -not $isRollback) {
-        # deployMode="upgrade" or unset -default to staged upgrade.
-        # If a patch of this solution is already installed, --stage-and-upgrade is rejected
-        # by Dataverse. Detect and use the two-step holding pattern automatically.
+    } elseif ($solutionDeployMode -eq "upgrade" -and -not $isRollback) {
+        # deployMode="upgrade" explicitly set -always use the upgrade path regardless of
+        # whether pac solution list reported the solution as installed (e.g. patch-only installs
+        # won't show the base solution, causing $isUpgrade to be false).
+        Write-Host "  deployMode=upgrade -checking for patch on target..."
         $hasPatch = @($installed.Keys | Where-Object { $_ -like "${name}_Patch_*" }).Count -gt 0
         if ($hasPatch) {
-            Write-Host "  Patch detected on target -using holding pattern (--import-as-holding + pac solution upgrade)"
+            Write-Host "  Patch detected -using holding pattern (--import-as-holding + pac solution upgrade)"
             $importArgs += "--import-as-holding"
         } else {
-            if ($solutionDeployMode -eq "upgrade") {
-                Write-Host "  deployMode=upgrade -using --stage-and-upgrade"
-            }
+            Write-Host "  No patch detected -using --stage-and-upgrade"
+            $importArgs += "--stage-and-upgrade"
+            $importArgs += "--skip-lower-version"
+        }
+    } elseif ($isUpgrade -and -not $isRollback) {
+        # deployMode unset but pac detected a version change -default to staged upgrade
+        $hasPatch = @($installed.Keys | Where-Object { $_ -like "${name}_Patch_*" }).Count -gt 0
+        if ($hasPatch) {
+            Write-Host "  Patch detected -using holding pattern (--import-as-holding + pac solution upgrade)"
+            $importArgs += "--import-as-holding"
+        } else {
+            Write-Host "  Using --stage-and-upgrade"
             $importArgs += "--stage-and-upgrade"
             $importArgs += "--skip-lower-version"
         }
@@ -606,15 +616,79 @@ foreach ($solution in $solutions) {
         $importArgs += @("--settings-file", $settingsFile)
     }
 
+    # Waits for a Dataverse async operation to reach a terminal state by polling
+    # /asyncoperations. Returns $true on success, $false on failure.
+    # Used when pac times out but the operation is still running in Dataverse.
+    function Wait-DataverseAsyncOperation([string]$operationId, [string]$envUrl, [hashtable]$headers) {
+        Write-Host "  pac timed out -continuing to poll Dataverse async operation $operationId..."
+        $pollInterval = 15
+        while ($true) {
+            Start-Sleep -Seconds $pollInterval
+            try {
+                $op = Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/asyncoperations($operationId)?`$select=statecode,statuscode,friendlymessage" -Headers $headers
+                $state  = [int]$op.statecode   # 3 = Completed
+                $status = [int]$op.statuscode  # 30 = Succeeded, 31 = Failed, 32 = Canceled
+                if ($state -eq 3) {
+                    if ($status -eq 30) {
+                        Write-Host "  Dataverse operation completed successfully."
+                        return $true
+                    } else {
+                        $msg = if ($op.friendlymessage) { $op.friendlymessage } else { "statuscode=$status" }
+                        Write-Host "  Dataverse operation failed: $msg"
+                        return $false
+                    }
+                }
+                Write-Host "  Still running... (statecode=$state, statuscode=$status)"
+            } catch {
+                Write-Host "  WARNING: Could not poll async operation: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    # Runs a pac command, captures output, and handles the case where pac times out
+    # but the underlying Dataverse async operation is still running. Returns $true on
+    # success. Writes an error and returns $false on failure.
+    function Invoke-PacImport([string[]]$pacArgs, [string]$solutionName, [string]$envUrl, [hashtable]$apiHdrs) {
+        $output = & pac @pacArgs 2>&1 | Tee-Object -Variable pacLines
+        $exitCode = $LASTEXITCODE
+
+        # Check for timeout: pac exits 0 but prints "timed out"
+        $timedOut = $pacLines -match "timed out"
+        if ($timedOut) {
+            # Extract the async operation ID from the output line like:
+            # "Wait for operation <guid> timed out after ..."
+            $opIdLine = $pacLines | Where-Object { $_ -match "Wait for operation ([0-9a-f\-]{36}) timed out" } | Select-Object -First 1
+            if ($opIdLine -match "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})") {
+                $opId = $Matches[1]
+                if ($apiHdrs) {
+                    return (Wait-DataverseAsyncOperation $opId $envUrl $apiHdrs)
+                } else {
+                    Write-Host "  WARNING: pac timed out and no API token available to continue polling. Treating as failure."
+                    return $false
+                }
+            } else {
+                Write-Host "  WARNING: pac timed out but could not extract operation ID. Treating as failure."
+                return $false
+            }
+        }
+
+        # Check for other failure indicators
+        if ($exitCode -ne 0 -or ($pacLines -match "Solution import failed\.")) {
+            return $false
+        }
+
+        return $true
+    }
+
     # Execute import (or dry run)
     if ($DryRun) {
         Write-Host "  [DRY RUN] Would execute: pac $($importArgs -join ' ')"
         $deployedSolutions += $name
     } else {
         Write-Host "  Importing managed solution..."
-        & pac @importArgs
+        $importOk = Invoke-PacImport $importArgs $name $EnvironmentUrl $apiHeaders
 
-        if ($LASTEXITCODE -ne 0) {
+        if (-not $importOk) {
             Write-Host "  ERROR: Failed to import solution: $name"
             Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Release failed for '$Subfolder' → '$EnvironmentUrl'. Failed to import solution: $name.")
             Write-Error "Failed to import solution: $name. Aborting release."
@@ -624,9 +698,9 @@ foreach ($solution in $solutions) {
         # Second step of the holding pattern: apply the staged upgrade
         if ($importArgs -contains "--import-as-holding") {
             Write-Host "  Applying staged upgrade..."
-            pac solution upgrade --solution-name $name --async --max-async-wait-time 60
+            $upgradeOk = Invoke-PacImport @("solution", "upgrade", "--solution-name", $name, "--async", "--max-async-wait-time", "60") $name $EnvironmentUrl $apiHeaders
 
-            if ($LASTEXITCODE -ne 0) {
+            if (-not $upgradeOk) {
                 Write-Host "  ERROR: Failed to apply upgrade for solution: $name"
                 Send-TeamsCard $notificationWebhookUrl (New-FailureCard "Release failed for '$Subfolder' → '$EnvironmentUrl'. Failed to apply upgrade for solution: $name.")
                 Write-Error "Failed to apply upgrade for solution: $name. Aborting release."
