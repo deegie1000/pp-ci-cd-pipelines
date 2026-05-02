@@ -290,15 +290,17 @@ if ($newTableIds.Count -eq 0) {
 } else {
     Write-Host "  Removing $($newTableIds.Count) inadvertently added table component(s)..."
     foreach ($tableId in $newTableIds) {
-        pac solution remove-solution-component `
-            --environment $envUrl `
-            --solution-name $SolutionUniqueName `
-            --component-id $tableId `
-            --component-type $tableComponentType
-        if ($LASTEXITCODE -eq 0) {
+        try {
+            $removeBody = @{
+                ComponentId        = $tableId
+                ComponentType      = $tableComponentType
+                SolutionUniqueName = $SolutionUniqueName
+            } | ConvertTo-Json -Compress
+            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/RemoveSolutionComponent" `
+                -Method Post -Headers $ApiHeaders -Body $removeBody | Out-Null
             Write-Host "  Removed table component: $tableId"
-        } else {
-            Write-Host "  WARNING: Could not remove table component $tableId from solution."
+        } catch {
+            Write-Host "  WARNING: Could not remove table component $tableId from solution: $($_.Exception.Message)"
         }
     }
 }
@@ -316,15 +318,17 @@ if ($newFlowIds.Count -eq 0) {
 } else {
     Write-Host "  Removing $($newFlowIds.Count) inadvertently added cloud flow component(s)..."
     foreach ($flowId in $newFlowIds) {
-        pac solution remove-solution-component `
-            --environment $envUrl `
-            --solution-name $SolutionUniqueName `
-            --component-id $flowId `
-            --component-type $workflowComponentType
-        if ($LASTEXITCODE -eq 0) {
+        try {
+            $removeBody = @{
+                ComponentId        = $flowId
+                ComponentType      = $workflowComponentType
+                SolutionUniqueName = $SolutionUniqueName
+            } | ConvertTo-Json -Compress
+            Invoke-RestMethod -Uri "$envUrl/api/data/v9.2/RemoveSolutionComponent" `
+                -Method Post -Headers $ApiHeaders -Body $removeBody | Out-Null
             Write-Host "  Removed cloud flow component: $flowId"
-        } else {
-            Write-Host "  WARNING: Could not remove cloud flow component $flowId from solution."
+        } catch {
+            Write-Host "  WARNING: Could not remove cloud flow component $flowId from solution: $($_.Exception.Message)"
         }
     }
 }
