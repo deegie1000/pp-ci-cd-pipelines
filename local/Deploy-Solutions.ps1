@@ -61,7 +61,7 @@ function Get-DataverseToken([string]$environmentUrl) {
     $cacheFile = Join-Path $env:TEMP "pp_cicd_dvtokens.json"
     $cacheKey  = $environmentUrl.TrimEnd("/").ToLower()
 
-    # Check cache first
+    # Check cache first; attempt a silent refresh when the access token is stale
     if (Test-Path $cacheFile) {
         try {
             $cache = Get-Content $cacheFile -Raw | ConvertFrom-Json
@@ -71,6 +71,34 @@ function Get-DataverseToken([string]$environmentUrl) {
                 if ($ageMin -lt 50) {
                     Write-Host "Using cached Dataverse API token (acquired $([int]$ageMin)m ago)."
                     return $entry.Value.token
+                }
+
+                # Access token stale - try silent refresh if we have a stored refresh token
+                if ($entry.Value.refreshToken) {
+                    Write-Host "Cached token expired - attempting silent refresh..."
+                    try {
+                        $scope   = "$environmentUrl/.default"
+                        $lb      = if ($entry.Value.loginBase) { $entry.Value.loginBase } else { "https://login.microsoftonline.com" }
+                        $tn      = if ($entry.Value.tenant)    { $entry.Value.tenant    } else { "organizations" }
+                        $tokResp = Invoke-RestMethod -Method Post `
+                            -Uri "$lb/$tn/oauth2/v2.0/token" `
+                            -ContentType "application/x-www-form-urlencoded" `
+                            -Body "grant_type=refresh_token&client_id=$clientId&refresh_token=$([uri]::EscapeDataString($entry.Value.refreshToken))&scope=$([uri]::EscapeDataString($scope))"
+                        $newToken   = $tokResp.access_token
+                        $newRefresh = if ($tokResp.refresh_token) { $tokResp.refresh_token } else { $entry.Value.refreshToken }
+                        $cache | Add-Member -NotePropertyName $cacheKey -NotePropertyValue ([PSCustomObject]@{
+                            token        = $newToken
+                            refreshToken = $newRefresh
+                            loginBase    = $lb
+                            tenant       = $tn
+                            acquiredAt   = (Get-Date).ToString("o")
+                        }) -Force
+                        $cache | ConvertTo-Json | Set-Content $cacheFile -Encoding UTF8
+                        Write-Host "Token refreshed silently."
+                        return $newToken
+                    } catch {
+                        Write-Host "Silent refresh failed - falling back to device code login."
+                    }
                 }
             }
         } catch { }
@@ -116,7 +144,8 @@ function Get-DataverseToken([string]$environmentUrl) {
     $interval  = if ($dcResp.interval) { [int]$dcResp.interval } else { 5 }
     $expiresAt = (Get-Date).AddSeconds([int]$dcResp.expires_in)
 
-    $token = $null
+    $token        = $null
+    $refreshToken = $null
     while ((Get-Date) -lt $expiresAt) {
         Start-Sleep -Seconds $interval
         try {
@@ -124,7 +153,8 @@ function Get-DataverseToken([string]$environmentUrl) {
                 -Uri "$loginBase/$tenant/oauth2/v2.0/token" `
                 -ContentType "application/x-www-form-urlencoded" `
                 -Body "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$clientId&device_code=$([uri]::EscapeDataString($dcResp.device_code))"
-            $token = $tokResp.access_token
+            $token        = $tokResp.access_token
+            $refreshToken = $tokResp.refresh_token
             break
         } catch {
             $errBody = $null
@@ -143,8 +173,11 @@ function Get-DataverseToken([string]$environmentUrl) {
             try { Get-Content $cacheFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{} }
         } else { [PSCustomObject]@{} }
         $cache | Add-Member -NotePropertyName $cacheKey -NotePropertyValue ([PSCustomObject]@{
-            token      = $token
-            acquiredAt = (Get-Date).ToString("o")
+            token        = $token
+            refreshToken = $refreshToken
+            loginBase    = $loginBase
+            tenant       = $tenant
+            acquiredAt   = (Get-Date).ToString("o")
         }) -Force
         $cache | ConvertTo-Json | Set-Content $cacheFile -Encoding UTF8
     } catch { }
