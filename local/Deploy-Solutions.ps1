@@ -673,7 +673,21 @@ foreach ($solution in $solutions) {
                 }
                 Write-Host "  Still running... (statecode=$state, statuscode=$status)"
             } catch {
-                Write-Host "  WARNING: Could not poll async operation: $($_.Exception.Message)"
+                # Detect a 401 (token expired mid-poll) and silently refresh before retrying
+                $statusCode = $null
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+                if ($statusCode -eq 401) {
+                    Write-Host "  Dataverse token expired during polling - refreshing silently..."
+                    try {
+                        $newToken = Get-DataverseToken $envUrl
+                        $headers["Authorization"] = "Bearer $newToken"
+                        Write-Host "  Token refreshed - resuming poll."
+                    } catch {
+                        Write-Host "  WARNING: Could not refresh token: $($_.Exception.Message)"
+                    }
+                } else {
+                    Write-Host "  WARNING: Could not poll async operation: $($_.Exception.Message)"
+                }
             }
         }
     }
